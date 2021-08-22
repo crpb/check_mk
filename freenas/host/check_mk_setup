@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#===============================================================================
+#
+#          FILE: check_mk_setup
+# 
+#         USAGE: ./check_mk_setup
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Christopher Bock (cb), christopher@bocki.com
+#  ORGANIZATION: 
+#       CREATED: 07/17/2018 05:54:02 PM
+#      REVISION: 2.0
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+SCRIPTPATH="$( cd "$(dirname "$0")" ; pwd -P )"
+#SOURCE="http://git.mathias-kettner.de/git/?p=check_mk.git;a=blob_plain;f=agents/check_mk_agent.freebsd;hb=HEAD"
+#SOURCE="https://raw.githubusercontent.com/tribe29/checkMK/master/agents/check_mk_agent.freebsd"
+SOURCE="https://YOURCHECKMKHOST/YOURSITE/check_mk/agents/check_mk_agent.freebsd"
+BIN="check_mk_agent"
+BIN_WGET=`which wget`
+SERVICES_LINE='checkmk 6556/tcp #check_mk'
+
+REPOSITORY='https://YOURCHECKMKHOST/YOURSITE/check_mk/agents/plugins/'
+
+PLUGINS=""
+
+$BIN_WGET -q -O ${SCRIPTPATH}/${BIN} "${SOURCE}"
+chmod +x ${SCRIPTPATH}/${BIN}
+
+INETD_LINE="checkmk stream tcp nowait root `echo -n $SCRIPTPATH`/check_mk_agent check_mk_agent"
+
+grep -qF -- "$INETD_LINE" "/etc/inetd.conf" || echo "$INETD_LINE" >> /etc/inetd.conf
+grep -qF -- "$INETD_LINE" "/conf/base/etc/inetd.conf" || echo "$INETD_LINE" >> /conf/base/etc/inetd.conf
+grep -qF -- "$SERVICES_LINE" "/conf/base/etc/services" || echo "$SERVICES_LINE" >> "/conf/base/etc/services"
+grep -qF -- "$SERVICES_LINE" "/etc/services" || echo "$SERVICES_LINE" >> "/etc/services"
+
+killall -HUP inetd
+
+sed -i '' 's|export MK_LIBDIR="/usr/local/lib/check_mk_agent"|export MK_LIBDIR="'${SCRIPTPATH}'/check_mk_plugins"|g' ${SCRIPTPATH}/${BIN}
+
+for I in $PLUGINS;
+do
+        mkdir -p ${SCRIPTPATH}/check_mk_plugins/
+        $BIN_WGET -q -O ${SCRIPTPATH}/check_mk_plugins/$I "${REPOSITORY}/$I"
+        chmod +x ${SCRIPTPATH}/check_mk_plugins/$I
+done

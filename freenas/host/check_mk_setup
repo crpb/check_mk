@@ -47,7 +47,7 @@ sed -i '' 's|export MK_LIBDIR="/usr/local/lib/check_mk_agent"|export MK_LIBDIR="
 
 for I in $PLUGINS;
 do
-        mkdir -p ${SCRIPTPATH}/check_mk_plugins/
-        $BIN_WGET -q -O ${SCRIPTPATH}/check_mk_plugins/$I "${REPOSITORY}/$I"
-        chmod +x ${SCRIPTPATH}/check_mk_plugins/$I
+        mkdir -p ${SCRIPTPATH}/check_mk_plugins/plugins
+        $BIN_WGET -q -O ${SCRIPTPATH}/check_mk_plugins/plugins/$I "${REPOSITORY}/$I"
+        chmod +x ${SCRIPTPATH}/check_mk_plugins/plugins/$I
 done

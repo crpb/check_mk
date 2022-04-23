@@ -47,7 +47,7 @@ grep -qF -- "$INETD_LINE" "/conf/base/etc/inetd.conf" || echo "$INETD_LINE" >> /
 grep -qF -- "$SERVICES_LINE" "/conf/base/etc/services" || echo "$SERVICES_LINE" >> /conf/base/etc/services
 grep -qF -- "$SERVICES_LINE" "/etc/services" || echo "$SERVICES_LINE" >> /etc/services
 grep -qF -- "$HOSTS_ALLOW" "/etc/hosts.allow" || echo "$HOSTS_ALLOW" >> /etc/hosts.allow
-grep -qF -- "checmk: ALL" "/etc/hosts.deny" || echo "checkmk: ALL" >> /etc/hosts.deny
+grep -qF -- "checkmk: ALL" "/etc/hosts.deny" || echo "checkmk: ALL" >> /etc/hosts.deny
 
 killall -HUP inetd
 

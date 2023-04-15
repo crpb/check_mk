@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#===============================================================================
+#
+#          FILE: check_mk_setup
+# 
+#         USAGE: ./check_mk_setup
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: Active inetd in TrueNAS - tftp
+#          BUGS: ---
+#         NOTES: Can be installed wherever you like.
+#                Add path of the file to a Start-Script (Post-Boot).
+#                Alt. set periodic cronjob for long-running-systems.
+#        AUTHOR: Christopher Bock (cb), christopher@bocki.com
+#  ORGANIZATION: 
+#       CREATED: 07/17/2018 05:54:02 PM
+#       UPDATED: 10/01/2022 08:51:34 AM
+#      REVISION: 2.4
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+OMD_HOST="status.$(hostname -d)"
+OMD_IP=$(getent hosts "$OMD_HOST" |cut -d\  -f1)
+OMD_CL="127.0.0.1, ${OMD_IP:-}"
+SCRIPTPATH="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+SOURCE="https://raw.githubusercontent.com/tribe29/checkMK/master/agents/check_mk_agent.freebsd"
+#SOURCE="https://YOUR.OMD.HOST/SITENAME/check_mk/agents/check_mk_agent.freebsd"
+BIN="check_mk_agent"
+
+#Do we wan't extra plugins?
+#REPOSITORY='https://YOUR.OMD.HOST/SITENAME/check_mk/agents/plugins/'
+REPOSITORY='https://raw.githubusercontent.com/tribe29/checkMK/master/agents/plugins/'
+PLUGINS=""
+
+# check if wget returns 0
+wget -q -O /dev/null "${SOURCE}" || exit
+wget -q -O "${SCRIPTPATH}/${BIN}" "${SOURCE}"
+chmod +x "${SCRIPTPATH}/${BIN}"
+
+INETD_LINE="checkmk stream tcp nowait root $SCRIPTPATH/$BIN check_mk_agent"
+SERVICES_LINE="checkmk		6556/tcp   #check_mk_agent"
+HOSTS_ALLOW="check_mk_agent: ${OMD_CL}"
+
+grep -qxF -- "$INETD_LINE" "/etc/inetd.conf" || echo "$INETD_LINE" >> /etc/inetd.conf
+grep -qxF -- "$INETD_LINE" "/conf/base/etc/inetd.conf" || echo "$INETD_LINE" >> /conf/base/etc/inetd.conf
+grep -qxF -- "$SERVICES_LINE" "/conf/base/etc/services" || echo "$SERVICES_LINE" >> /conf/base/etc/services
+grep -qxF -- "$SERVICES_LINE" "/etc/services" || echo "$SERVICES_LINE" >> /etc/services
+grep -qxF -- "$HOSTS_ALLOW" "/etc/hosts.allow" || echo "$HOSTS_ALLOW" >> /etc/hosts.allow
+grep -qxF -- "check_mk_agent: ALL" "/etc/hosts.deny" || echo "check_mk_agent: ALL" >> /etc/hosts.deny
+
+killall -HUP inetd
+
+sed -i '' 's|export MK_LIBDIR="/usr/local/lib/check_mk_agent"|export MK_LIBDIR="'"${SCRIPTPATH}"'/check_mk_plugins"|g' "${SCRIPTPATH}/${BIN}"
+
+for plugin in $PLUGINS;
+do
+  mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins"
+  $BIN_WGET -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}" "${REPOSITORY}/${plugin}"
+  chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}"
+done

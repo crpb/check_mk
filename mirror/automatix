@@ -1,0 +1,18 @@
+#!/bin/bash
+TARGETDIR=/tmp/cmk && mkdir -p $TARGETDIR || exit
+V="$(curl -s https://checkmk.com/download |grep -Po '.*window.downloads = \K.*' |jq -r '.cmk.cre|keys[]|@text' 2>/dev/null|grep -v b|sort -h|tail -n 1)"
+VER="${1:-${V}}"
+RELEASE="$(curl -sk -L "https://www.debian.org/releases/stable/"|recode html|grep -F "<title>"|grep -iPo "(?<=“)(.*)(?=”)")"
+if [ ! -f "${TARGETDIR}/check-mk-raw-${VER}_0.${RELEASE}_amd64.deb" ]; then
+  readarray -t VERSIONS < <(curl -s https://checkmk.com/download |grep -Po '.*window.downloads = \K.*'|jq -r '.cmk.cme|.[][][]|@tsv' 2>/dev/null|grep -Po "check.*$V.*deb"|grep "${V}"|sed 's/managed/raw/g')
+  URL="https://download.checkmk.com/checkmk/${VER}"
+  wget -nc -q -P "${TARGETDIR}" $(printf "${URL}/%s " "${VERSIONS[@]}")
+  TMPDIR=$(mktemp -d)
+  ar -x "${TARGETDIR}/check-mk-raw-${VER}_0.${RELEASE}_amd64.deb" data.tar.xz --output="$TMPDIR"
+  FILE="$TMPDIR/data.tar.xz"
+  tar Jft "$FILE" |grep -E '(agent.msi|all.deb|rpm|agent.freebsd)$' |xargs -n 1 tar Jfx "$FILE" --transform='s/.*\///' -C $TARGETDIR
+  mv "$TARGETDIR/check_mk_agent.freebsd" "$TARGETDIR/check_mk_agent-$VER-1.freebsd"
+  mv "$TARGETDIR/check_mk_agent.msi" "$TARGETDIR/check_mk_agent-$VER-1.msi"
+  rm -Rf "$TMPDIR"
+fi
+find "${TARGETDIR}" -iname "*${VER}*"

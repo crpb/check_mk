@@ -1,0 +1,342 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<AdminArsenal.Export Code="PDQInventory" Name="PDQ Inventory" Version="19.3.350.0" MinimumVersion="4.0">
+  <Collection>
+    <ReportDefinition name="Definition">
+      <RootFilter name="Filter">
+        <Comparison>All</Comparison>
+        <Filters type="list">
+          <ValueFilter>
+            <Table>Application</Table>
+            <Column>Name</Column>
+            <Comparison>StartsWith</Comparison>
+            <Value>@(CheckMKAgent)</Value>
+          </ValueFilter>
+        </Filters>
+      </RootFilter>
+      <ReportDefinitionTypeName>BasicReportDefinition</ReportDefinitionTypeName>
+      <Columns type="list">
+        <Column>
+          <Column>ComputerId</Column>
+          <Summary></Summary>
+          <Table>Computer</Table>
+          <Title></Title>
+        </Column>
+      </Columns>
+    </ReportDefinition>
+    <IsDrilldown value="false" />
+    <ImportedPath></ImportedPath>
+    <TypeName>DynamicCollection</TypeName>
+    <Created>2018-08-16T15:00:01.0000000+02:00</Created>
+    <Description>Systems with @(CheckMKAgent)</Description>
+    <Error></Error>
+    <Id value="1786" />
+    <LibraryCollectionId value="3460" />
+    <IsEnabled value="true" />
+    <Modified>2021-03-08T16:56:30.0000000+01:00</Modified>
+    <Name>Check MK Agent</Name>
+    <ParentId value="null" />
+    <Path>Check MK Agent</Path>
+    <Type>DynamicCollection</Type>
+    <CustomVariables type="list">
+      <CustomVariable>
+        <Name>CheckMKAgent</Name>
+        <Value>Check MK Agent 2.1</Value>
+      </CustomVariable>
+    </CustomVariables>
+    <Children type="list">
+      <Collection>
+        <ReportDefinition name="Definition">
+          <RootFilter name="Filter">
+            <Comparison>All</Comparison>
+            <Filters type="list">
+              <ValueFilter>
+                <Table>Application</Table>
+                <Column>Name</Column>
+                <Comparison>StartsWith</Comparison>
+                <Value>@(CheckMKAgent)</Value>
+              </ValueFilter>
+              <ValueFilter>
+                <Table>Application</Table>
+                <Column>Version</Column>
+                <Comparison>Wildcard</Comparison>
+                <Value>@(CheckMKAgentVer)</Value>
+              </ValueFilter>
+            </Filters>
+          </RootFilter>
+          <ReportDefinitionTypeName>BasicReportDefinition</ReportDefinitionTypeName>
+          <Columns type="list">
+            <Column>
+              <Column>ComputerId</Column>
+              <Summary></Summary>
+              <Table>Computer</Table>
+              <Title></Title>
+            </Column>
+          </Columns>
+        </ReportDefinition>
+        <IsDrilldown value="false" />
+        <ImportedPath></ImportedPath>
+        <TypeName>DynamicCollection</TypeName>
+        <Created>2018-08-16T15:04:40.0000000+02:00</Created>
+        <Description>Systems with @(CheckMKAgent) (@(CheckMKAgentVer))</Description>
+        <Error></Error>
+        <Id value="1787" />
+        <LibraryCollectionId value="3461" />
+        <IsEnabled value="true" />
+        <Modified>2021-03-08T16:58:31.0000000+01:00</Modified>
+        <Name>Check MK Agent (Latest)</Name>
+        <ParentId value="1786" />
+        <Path>Check MK Agent\Check MK Agent (Latest)</Path>
+        <Type>DynamicCollection</Type>
+        <CustomVariables type="list">
+          <CustomVariable>
+            <Name>CheckMKAgent</Name>
+            <Value>Check MK Agent 2.1</Value>
+          </CustomVariable>
+          <CustomVariable>
+            <Name>CheckMKAgentVer</Name>
+            <Value>2.1.0p15</Value>
+          </CustomVariable>
+        </CustomVariables>
+        <Children type="list" />
+      </Collection>
+      <Collection>
+        <ReportDefinition name="Definition">
+          <RootFilter name="Filter">
+            <Comparison>NotAny</Comparison>
+            <Filters type="list">
+              <ValueFilter>
+                <Table>Application</Table>
+                <Column>Name</Column>
+                <Comparison>StartsWith</Comparison>
+                <Value>@(CheckMKAgent)</Value>
+              </ValueFilter>
+              <ValueFilter>
+                <Table>Computer</Table>
+                <Column>NeverScanned</Column>
+                <Comparison>IsTrue</Comparison>
+              </ValueFilter>
+            </Filters>
+          </RootFilter>
+          <ReportDefinitionTypeName>BasicReportDefinition</ReportDefinitionTypeName>
+          <Columns type="list">
+            <Column>
+              <Column>ComputerId</Column>
+              <Summary></Summary>
+              <Table>Computer</Table>
+              <Title></Title>
+            </Column>
+          </Columns>
+        </ReportDefinition>
+        <IsDrilldown value="false" />
+        <ImportedPath></ImportedPath>
+        <TypeName>DynamicCollection</TypeName>
+        <Created>2018-08-16T15:11:01.0000000+02:00</Created>
+        <Description>Systems missing @(CheckMKAgent)</Description>
+        <Error></Error>
+        <Id value="1788" />
+        <LibraryCollectionId value="3462" />
+        <IsEnabled value="true" />
+        <Modified>2021-03-08T16:59:04.0000000+01:00</Modified>
+        <Name>Check MK Agent (Not Installed)</Name>
+        <ParentId value="1786" />
+        <Path>Check MK Agent\Check MK Agent (Not Installed)</Path>
+        <Type>DynamicCollection</Type>
+        <CustomVariables type="list">
+          <CustomVariable>
+            <Name>CheckMKAgent</Name>
+            <Value>Check MK Agent 2.1</Value>
+          </CustomVariable>
+        </CustomVariables>
+        <Children type="list">
+          <Collection>
+            <ReportDefinition name="Definition">
+              <RootFilter name="Filter">
+                <Comparison>All</Comparison>
+                <Filters type="list">
+                  <GroupFilter>
+                    <Comparison>NotAll</Comparison>
+                    <Filters type="list">
+                      <ValueFilter>
+                        <Table>Application</Table>
+                        <Column>Name</Column>
+                        <Comparison>StartsWith</Comparison>
+                        <Value>@(CheckMKAgent)</Value>
+                      </ValueFilter>
+                    </Filters>
+                  </GroupFilter>
+                  <GroupFilter>
+                    <Comparison>NotAny</Comparison>
+                    <Filters type="list">
+                      <ValueFilter>
+                        <Table>Computer</Table>
+                        <Column>NeverScanned</Column>
+                        <Comparison>IsTrue</Comparison>
+                      </ValueFilter>
+                      <ValueFilter>
+                        <Table>Computer</Table>
+                        <Column>OSName</Column>
+                        <Comparison>Contains</Comparison>
+                        <Value>server</Value>
+                      </ValueFilter>
+                    </Filters>
+                  </GroupFilter>
+                </Filters>
+              </RootFilter>
+              <ReportDefinitionTypeName>BasicReportDefinition</ReportDefinitionTypeName>
+              <Columns type="list">
+                <Column>
+                  <Column>ComputerId</Column>
+                  <Summary></Summary>
+                  <Table>Computer</Table>
+                  <Title></Title>
+                </Column>
+              </Columns>
+            </ReportDefinition>
+            <IsDrilldown value="false" />
+            <ImportedPath></ImportedPath>
+            <TypeName>DynamicCollection</TypeName>
+            <Created>2018-08-16T15:11:15.0000000+02:00</Created>
+            <Description>Workstations missing @(CheckMKAgent)</Description>
+            <Error></Error>
+            <Id value="1789" />
+            <LibraryCollectionId value="3463" />
+            <IsEnabled value="true" />
+            <Modified>2021-03-08T16:59:41.0000000+01:00</Modified>
+            <Name>Check MK Agent (Not Installed) (Workstations)</Name>
+            <ParentId value="1788" />
+            <Path>Check MK Agent\Check MK Agent (Not Installed)\Check MK Agent (Not Installed) (Workstations)</Path>
+            <Type>DynamicCollection</Type>
+            <CustomVariables type="list">
+              <CustomVariable>
+                <Name>CheckMKAgent</Name>
+                <Value>Check MK Agent 2.1</Value>
+              </CustomVariable>
+            </CustomVariables>
+            <Children type="list" />
+          </Collection>
+          <Collection>
+            <ReportDefinition name="Definition">
+              <RootFilter name="Filter">
+                <Comparison>All</Comparison>
+                <Filters type="list">
+                  <GroupFilter>
+                    <Comparison>NotAll</Comparison>
+                    <Filters type="list">
+                      <ValueFilter>
+                        <Table>Application</Table>
+                        <Column>Name</Column>
+                        <Comparison>StartsWith</Comparison>
+                        <Value>@(CheckMKAgent)</Value>
+                      </ValueFilter>
+                    </Filters>
+                  </GroupFilter>
+                  <GroupFilter>
+                    <Comparison>NotAny</Comparison>
+                    <Filters type="list">
+                      <ValueFilter>
+                        <Table>Computer</Table>
+                        <Column>NeverScanned</Column>
+                        <Comparison>IsTrue</Comparison>
+                      </ValueFilter>
+                    </Filters>
+                  </GroupFilter>
+                  <ValueFilter>
+                    <Table>Computer</Table>
+                    <Column>OSName</Column>
+                    <Comparison>Contains</Comparison>
+                    <Value>server</Value>
+                  </ValueFilter>
+                </Filters>
+              </RootFilter>
+              <ReportDefinitionTypeName>BasicReportDefinition</ReportDefinitionTypeName>
+              <Columns type="list">
+                <Column>
+                  <Column>ComputerId</Column>
+                  <Summary></Summary>
+                  <Table>Computer</Table>
+                  <Title></Title>
+                </Column>
+              </Columns>
+            </ReportDefinition>
+            <IsDrilldown value="false" />
+            <ImportedPath></ImportedPath>
+            <TypeName>DynamicCollection</TypeName>
+            <Created>2018-08-16T15:11:15.0000000+02:00</Created>
+            <Description>Workstations missing @(CheckMKAgent)</Description>
+            <Error></Error>
+            <Id value="1799" />
+            <LibraryCollectionId value="3463" />
+            <IsEnabled value="true" />
+            <Modified>2022-05-05T09:04:55.0000000+02:00</Modified>
+            <Name>Check MK Agent (Not Installed) (Server)</Name>
+            <ParentId value="1788" />
+            <Path>Check MK Agent\Check MK Agent (Not Installed)\Check MK Agent (Not Installed) (Server)</Path>
+            <Type>DynamicCollection</Type>
+            <CustomVariables type="list">
+              <CustomVariable>
+                <Name>CheckMKAgent</Name>
+                <Value>Check MK Agent 2.1</Value>
+              </CustomVariable>
+            </CustomVariables>
+            <Children type="list" />
+          </Collection>
+        </Children>
+      </Collection>
+      <Collection>
+        <ReportDefinition name="Definition">
+          <RootFilter name="Filter">
+            <Comparison>All</Comparison>
+            <Filters type="list">
+              <ValueFilter>
+                <Table>Application</Table>
+                <Column>Name</Column>
+                <Comparison>StartsWith</Comparison>
+                <Value>@(CheckMKAgent)</Value>
+              </ValueFilter>
+              <ValueFilter>
+                <Table>Application</Table>
+                <Column>Version</Column>
+                <Comparison>!Wildcard</Comparison>
+                <Value>@(CheckMKAgentVer)</Value>
+              </ValueFilter>
+            </Filters>
+          </RootFilter>
+          <ReportDefinitionTypeName>BasicReportDefinition</ReportDefinitionTypeName>
+          <Columns type="list">
+            <Column>
+              <Column>ComputerId</Column>
+              <Summary></Summary>
+              <Table>Computer</Table>
+              <Title></Title>
+            </Column>
+          </Columns>
+        </ReportDefinition>
+        <IsDrilldown value="false" />
+        <ImportedPath></ImportedPath>
+        <TypeName>DynamicCollection</TypeName>
+        <Created>2018-08-16T15:11:31.0000000+02:00</Created>
+        <Description>Systems with an older version of @(CheckMKAgent)  (lower than @(CheckMKAgentVer))</Description>
+        <Error></Error>
+        <Id value="1790" />
+        <LibraryCollectionId value="3464" />
+        <IsEnabled value="true" />
+        <Modified>2021-03-08T17:00:56.0000000+01:00</Modified>
+        <Name>Check MK Agent (Old)</Name>
+        <ParentId value="1786" />
+        <Path>Check MK Agent\Check MK Agent (Old)</Path>
+        <Type>DynamicCollection</Type>
+        <CustomVariables type="list">
+          <CustomVariable>
+            <Name>CheckMKAgent</Name>
+            <Value>Check MK Agent 2.1</Value>
+          </CustomVariable>
+          <CustomVariable>
+            <Name>CheckMKAgentVer</Name>
+            <Value>2.1.0p15</Value>
+          </CustomVariable>
+        </CustomVariables>
+        <Children type="list" />
+      </Collection>
+    </Children>
+  </Collection>
+</AdminArsenal.Export>

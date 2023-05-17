@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
+export DEBIAN_FRONTEND=noninteractive
+if [[ $EUID -ne 0 ]]; then
+  exec sudo "$0"
+fi
 MIRROR="https://download.checkmk.com/checkmk"
-V="$(curl -s https://download.checkmk.com/stable_downloads.json |jq -r '.checkmk[].version'|sort -h|grep -v b|tail -n 1)"
+V="$(curl -s https://download.checkmk.com/stable_downloads.json |jq -r '.checkmk[].version'|grep -v b|sort -h|tail -n 1)"
 CMKVER="${1:-${V}}"
 DEBFILE="check-mk-raw-${CMKVER}_0.$(lsb_release -cs)_amd64.deb"
 DEBLINK="${MIRROR}/${CMKVER}/${DEBFILE}"
 
-export DEBIAN_FRONTEND=noninteractive
-SUDO=''
-if [[ $EUID -ne 0 ]]; then
-    SUDO='sudo'
-fi
-
-$SUDO bash<<_
 wget "${DEBLINK}" -P /tmp -nc
 dpkg -i "/tmp/${DEBFILE}"
 omd stop
 omd -f -V ${CMKVER}.cre update --conflict=install "$(omd sites -b)"
 omd start "$(omd sites -b)"
-#omd cleanup
 dpkg -i "/opt/omd/versions/default/share/check_mk/agents/check-mk-agent_${CMKVER}-1_all.deb"
+rm "/tmp/${DEBFILE}"
+omd cleanup
 clear
 su - $(omd sites -b) bash -c 'omd status; omd version'
-_

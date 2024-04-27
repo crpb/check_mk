@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2012 - 2021 MailStore Software GmbH
+# Copyright (c) 2012 - 2024 MailStore Software GmbH
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -23,11 +23,11 @@
 
 __doc__ = """Wrapper for MailStore Server's Administration API"""
 
-
 import urllib.request
 import urllib.error
 import urllib.parse
 import logging
+import base64
 import json
 import ssl
 import sys
@@ -35,28 +35,33 @@ import sys
 
 class BaseClient:
     """The API client class"""
+
+    lowLevelMethods = ["get-status", "cancel-async", "get-metadata"]
+
+    logLevels = {0: logging.CRITICAL,  # No log output, CRITICAL is not used in here
+                 1: logging.ERROR,     # Log errors only
+                 2: logging.WARNING,   # Log errors and warnings
+                 3: logging.INFO,      # Log information what is being done
+                 4: logging.DEBUG}     # Log also send and received data
+
     def __init__(self, username, password, host, port, autoHandleToken, waitTime, callback, logLevel,
-                 ignoreInvalidSSLCerts):
+                 ignoreInvalidSSLCerts, instanceID):
 
         # Initialize connection settings
         self.username = username
         self.password = password
         self.host = host
         self.port = port
-  
-        # If set to true, client handles tokens/long running tasks itself.
-        self.autoHandleToken = autoHandleToken 
 
-        # Time in milliseconds the API should wait before returning a status token.
-        self.waitTime = waitTime               
+        # If set to true, client handles tokens/long-running tasks itself.
+        self.autoHandleToken = autoHandleToken
 
-        # Define logging parameters
+        # Time in milliseconds the server should wait before returning a status token, but only when
+        # no new status is available. When new a status is available, the server will return immediately.
+        self.waitTime = waitTime
+
+        # Set log level
         self.logLevel = logLevel
-        self.logLevels = {0: logging.NOTSET,   # No log output
-                          1: logging.ERROR,    # Log errors only
-                          2: logging.WARNING,  # Log errors and warnings
-                          3: logging.INFO,     # Log informational about what is being done
-                          4: logging.DEBUG}    # Log also send and received data
 
         # Callback Function for status
         self.callback = callback
@@ -65,37 +70,29 @@ class BaseClient:
         self.ignoreInvalidSSLCerts = ignoreInvalidSSLCerts
 
         # instanceID is required for SPE Connections
-        self.instanceID = None
+        self.instanceID = instanceID
 
-        # Initialize password manager
-        passwordMgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-        realm = (None, "https://{}:{}".format(self.host, self.port), self.username, self.password)
-        passwordMgr.add_password(*realm)
+        # Create TLS context
+        tlsContext = ssl.create_default_context()
+        if sys.version_info >= (3, 7):
+            tlsContext.minimum_version = ssl.TLSVersion.TLSv1_2
 
-        handlers = [urllib.request.HTTPBasicAuthHandler(password_mgr=passwordMgr)]
-
-        # Add handler to ignore certificate errors
+        # Do not verify certificates
         if self.ignoreInvalidSSLCerts:
-            ignoreSslContext = ssl.create_default_context()
-            ignoreSslContext.check_hostname = False
-            ignoreSslContext.verify_mode = ssl.CERT_NONE
-            if sys.version_info >= (3, 7):
-                ignoreSslContext.maximum_version = ssl.TLSVersion.TLSv1_2
-            handlers.append(urllib.request.HTTPSHandler(context=ignoreSslContext))
+            tlsContext.check_hostname = False
+            tlsContext.verify_mode = ssl.CERT_NONE
 
-        # By installing this opener every request is handled by our custom BasicAuth and HTTPS handlers
-        urllib.request.install_opener(urllib.request.build_opener(*handlers))
+        # By creating this opener every request is handled by our custom HTTPS handler
+        self.urlopener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=tlsContext))
 
         # Logger functionality
         self.log = logging.getLogger("MGMTLogger")
         self.log.setLevel(self.logLevels[self.logLevel])
         logging.basicConfig(format="%(asctime)s %(levelname)-8s %(module)s.%(funcName)s() [%(lineno)d]: %(message)s")
 
-        # Retrieve metadata from service so we can check for method availability
-        self.metadata = [{"name": "get-status", "args": []},
-                         {"name": "cancel-async", "args": []},
-                         {"name": "get-metadata", "args": []}]
-
+        # Create methods that are always available programmatically
+        self.metadata = [{"name": name, "args": []} for name in self.lowLevelMethods]
+        # Retrieve metadata from service, so we can check for method availability
         self.metadata.extend(self.GetMetadata())
 
         # Test whether all server methods are implemented
@@ -105,28 +102,15 @@ class BaseClient:
     # Private Methods                                                  #
     # ---------------------------------------------------------------- #
 
-    def _has_token(self, jsonValues):
-        """Verifies that all required attributes for token handling are available."""
-        if "token" in jsonValues and jsonValues["token"] is not None and "statusVersion" in jsonValues:
-            self.log.info("Status token: {} statusVersion: {}".format(jsonValues["token"], jsonValues["statusVersion"]))
-            return True
-        else:
-            self.log.info("No status token detected.")
-            return False
-
     def _self_test(self):
         """Test method that verifies that all backend methods are implemented."""
         for server_method in self.metadata:
-            if server_method["name"] not in ["get-status", "cancel-async", "get-metadata"]:
-                if not hasattr(self, server_method["name"]):
-                    self.log.error("Client does not implement server method '{}'".format(server_method["name"]))
+            if server_method["name"] not in self.lowLevelMethods and not hasattr(self, server_method["name"]):
+                self.log.warning(f"{type(self).__name__} does not implement server method {server_method['name']}")
 
     def _server_has_method(self, method):
         """Verifies that the backend offers the called method."""
-        for server_method in self.metadata:
-            if server_method["name"] == method:
-                return True
-        return False
+        return any(server_method["name"] == method for server_method in self.metadata)
 
     def _method_requires_instance_id(self, method):
         """Checks whether a method requires an instance ID."""
@@ -138,122 +122,121 @@ class BaseClient:
                         return True
                 return False
 
-    def call(self, method, arguments=None, invoke=True, autoHandleToken=None):
+    def call(self, method, arguments=None, autoHandleToken=None):
         """This is where the magic happens! This method is called by all other public methods that wrap
         an Administration API method."""
 
         if not self._server_has_method(method):
-            raise Exception("Server does not implement method '{}'.".format(method))
+            raise Exception(f"Server does not implement method '{method}'.")
 
         if arguments is None:
             arguments = {}
 
-        url = "https://{}:{}/api{}/{}".format(self.host, self.port, "/invoke" if invoke else "", method)
+        url = f"https://{self.host}:{self.port}/api{'' if method in self.lowLevelMethods else '/invoke'}/{method}"
 
-        arguments = [(key, arguments[key]) for key in list(arguments) if arguments[key]]
+        arguments = [(key, arguments[key]) for key in list(arguments) if arguments[key] is not None]
 
         if self._method_requires_instance_id(method):
-            self.log.debug("Method '{}' requires instanceID.".format(method))
-            if self.instanceID is not None:
-                arguments.append(("instanceID", self.instanceID))
-            else:
-                raise Exception("Required argument 'instanceID' for method '{}' cannot be set.".format(method))
+            self.log.debug(f"Method '{method}' requires instanceID.")
+            if self.instanceID is None:
+                raise Exception(f"Required argument 'instanceID' for method '{method}' cannot be set.")
+            arguments.append(("instanceID", self.instanceID))
 
         data = urllib.parse.urlencode(arguments)
 
-        self.log.debug("METHOD: {}".format(method))
-        self.log.debug("ARGUMENTS: {}".format(arguments))
-        self.log.info("HTTP POST: {}, {}".format(url, data))
+        self.log.debug(f"METHOD: {method}")
+        self.log.debug(f"ARGUMENTS: {arguments}")
+        self.log.info(f"HTTP POST: {url}, {data}")
 
+        # Preparing the request with basic auth header
+        request = urllib.request.Request(url, data=data.encode())
+        base64credentials = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+        request.add_header("Authorization", "Basic " + base64credentials)
         # Try making the HTTP request...
         try:
-            response = urllib.request.urlopen(url, data=data.encode())
+            response = self.urlopener.open(request)
         # ...and catch exceptions.
-        except urllib.error.HTTPError as e:
-            exceptionString = "{} {} {} {}".format(e.url, e.reason, e.code, data)
-            self.log.error(exceptionString)
-            raise e
-        except urllib.error.URLError as e:
-            exceptionString = "{} {}".format(e.reason, url)
-            self.log.error(exceptionString)
-            if "CERTIFICATE_VERIFY_FAILED" in str(e.reason):
-                self.log.error("Use a valid TLS certificate or initialize {} with 'ignoreInvalidSSLCerts=True' to workaround this error.".format(
-                    self.__class__.__name__))
-            raise e
-        except Exception as e:
-            self.log.error("Unhandled Exception: {}".format(repr(e)))
-            raise e
+        except urllib.error.HTTPError as he:
+            self.log.error(f"{he.url} {he.reason} {he.code} {data}")
+            raise he
+        except urllib.error.URLError as ue:
+            self.log.error(f"{ue.reason} {url}")
+            if "CERTIFICATE_VERIFY_FAILED" in str(ue.reason):
+                self.log.error(f"Use a valid TLS certificate or initialize {type(self).__name__} with 'ignoreInvalidSSLCerts=True' to workaround this error.")
+            raise ue
+        except Exception as ex:
+            self.log.error(f"Unhandled Exception: {repr(ex)}")
+            raise ex
+
+        self.log.debug(f"Raw Content-Length: {response.getheader('Content-Length')}")
 
         # Parse server response, which is always in JSON format.
         decodedValues = response.read().decode("utf-8-sig")
         jsonValues = json.loads(decodedValues)
-        self.log.debug("HTTP RESPONSE: {}".format(decodedValues))
+        self.log.debug(f"String Content-Length: {len(decodedValues)}")
+        self.log.debug(f"HTTP RESPONSE: {decodedValues}")
 
         # Check if response contains a status token and, depending on the
         # value of autoHandleToken, handle the token ourselves or just
         # return the JSON response to the caller.
-        autoHandleToken = self.autoHandleToken if autoHandleToken is None else autoHandleToken
-
-        if self._has_token(jsonValues):
-            if autoHandleToken:
+        if "token" in jsonValues and jsonValues["token"] is not None and "statusVersion" in jsonValues:
+            self.log.info(f"Status token: {jsonValues['token']} statusVersion: {jsonValues['statusVersion']}")
+            if self.autoHandleToken if autoHandleToken is None else autoHandleToken:
                 self.log.info("Automatic token handling is ENABLED.")
                 returnData = self.HandleToken(jsonValues)
             else:
                 self.log.info("Automatic token handling is DISABLED.")
                 returnData = jsonValues
         else:
+            self.log.info("No status token detected.")
             returnData = jsonValues
 
-        self.log.info("Returning data to caller method '{}'".format(method))
-        self.log.debug("DATA: {}".format(str(returnData)))
+        self.log.info(f"Returning data to caller method '{method}'")
+        self.log.debug(f"DATA: {str(returnData)}")
 
         return returnData
 
     def HandleToken(self, json_values, waitTime=None):
         """Helper function for status tokens handling"""
-        waitTime = waitTime if waitTime is not None else self.waitTime
-
         while json_values["statusCode"] == "running":
-            self.log.info("Refreshing status for task with token {}.".format(json_values["token"]))
-            json_values = self.GetStatus(json_values, waitTime=waitTime)
-            self.log.debug("New token values: {}".format(json_values))
+            self.log.info(f"Refreshing status for task with token {json_values['token']}.")
+            json_values = self.GetStatus(json_values, waitTime=self.waitTime if waitTime is None else waitTime)
+            self.log.debug(f"New token values: {json_values}")
             if callable(self.callback):
-                self.log.info("Executing callback function '{}' for refreshed status.".format(self.callback.__name__))
+                self.log.info(f"Executing callback function '{self.callback.__name__}' for refreshed status.")
                 self.callback(json_values)
 
-        self.log.info("Task with token {} finished.".format(json_values["token"]))
+        self.log.info(f"Task with token {json_values['token']} finished.")
         return json_values
 
     def YieldStatus(self, json_values, waitTime=None):
         """Helper function for status tokens handling"""
-        waitTime = waitTime if waitTime is not None else self.waitTime
         yield json_values
 
         while json_values["statusCode"] == "running":
-            self.log.info("Refreshing status for task with token {}.".format(json_values["token"]))
-            json_values = self.GetStatus(json_values, waitTime=waitTime)
+            self.log.info(f"Refreshing status for task with token {json_values['token']}.")
+            json_values = self.GetStatus(json_values, waitTime=self.waitTime if waitTime is None else waitTime)
             yield json_values
 
     # ---------------------------------------------------------------- #
     # Public Methods                                                   #
     # ---------------------------------------------------------------- #
- 
+
     def GetStatus(self, jsonValues, waitTime=None):
-        """Retrieve and update status token of long running task. This
+        """Retrieve and update status token of long-running task. This
         method is used for automatic token handling, but can also be
         called directly when manual token handling is done."""
         return self.call("get-status", {"token": jsonValues["token"],
                                         "millisecondsTimeout": self.waitTime if waitTime is None else waitTime,
-                                        "lastKnownStatusVersion": str(jsonValues["statusVersion"])}, False,
-                         autoHandleToken=False)
+                                        "lastKnownStatusVersion": str(jsonValues["statusVersion"])}, False)
 
     def CancelAsync(self, jsonValues):
-        """Cancels a long running task."""
+        """Cancels a long-running task."""
         return self.call("cancel-async", {"token": jsonValues["token"]}, False)
 
     def GetMetadata(self):
         """Retrieves all available methods from backend server."""
-        return self.call("get-metadata", invoke=False, autoHandleToken=True)
+        return self.call("get-metadata", autoHandleToken=True)
 
     # ---------------------------------------------------------------- #
     # Wrapped Administration API methods                               #
@@ -266,7 +249,7 @@ class BaseClient:
     def GetUsers(self, autoHandleToken=None):
         """Retrieve list of all users
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetUsers", autoHandleToken=autoHandleToken)
@@ -274,15 +257,15 @@ class BaseClient:
     def GetUserInfo(self, userName, autoHandleToken=None):
         """Retrieve detailed user information about specific user
 
-        :param userName:        User name of the user whose information should be returned.
+        :param userName:        Username of the user whose information should be returned.
         :type userName:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetUserInfo", {"userName": userName}, autoHandleToken=autoHandleToken)
 
     def CreateUser(self, userName, privileges=None, fullName=None, distinguishedName=None, authentication=None,
-                   password=None, autoHandleToken=None):
+                   password=None, loginPrivileges=None, autoHandleToken=None):
         """Creates a new user
 
         :param userName:            Name of the user to be created.
@@ -299,12 +282,12 @@ class BaseClient:
                                     * modifyArchiveProfiles The user can create, modify and delete archiving profiles.
                                     * export                The user can run export profiles.
                                     * modifyExportProfiles  The user can create, modify and delete export profiles.
-                                    * delete:               The user can delete messages.
+                                    * delete                The user can delete messages.
                                                             Please note: Normal user can only delete messages in folders where he has
                                                             been granted delete access. In addition, compliance settings may be in
                                                             effect, preventing administrators and normal users from deleting messages
                                                             even when they have been granted the privilege to do so.
-        :type privileges:           str
+        :type privileges:           str | list | tuple | NoneType
         :param fullName:            (optional) The full name (display name) of the user, e.g. "John Doe".
         :type fullName:             str
         :param distinguishedName:   (optional) The LDAP distinguished name of the user. This is typically automatically
@@ -318,29 +301,44 @@ class BaseClient:
         :param password:            (optional) The password that the user can use to log on to MailStore Server.
                                     Only used when authentication is set to 'integrated'.
         :type password:             str
-        :param autoHandleToken:     If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param loginPrivileges:     Comma-separated list of login privileges that the user should be granted. Possible values are:
+                                    * none                  The user is granted no login privileges.
+                                                            If specified, this value has to be the only value in the list.
+                                    * windows               Windows Client
+                                    * web                   Web Access
+                                    * outlook               Outlook Add-in
+                                    * windowsCmd            Windows Command Line Client, used for Scheduled Tasks
+                                    * imap                  IMAP
+                                    * api                   Management API, not available in SPE, only available for admins
+                                    If omitted or set to None default login privileges will be applied.
+        :type loginPrivileges:      str | list | tuple | NoneType
+        :param autoHandleToken:     If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:      bool
         """
         if isinstance(privileges, (list, tuple)):
             privileges = ",".join(privileges)
         if privileges is None:
             privileges = "none"
-        return self.call("CreateUser", {"userName": userName, "privileges": privileges, "fullName": fullName,
-                                        "distinguishedName": distinguishedName,
-                                        "authentication": authentication,
-                                        "password": password}, autoHandleToken=autoHandleToken)
+
+        if isinstance(loginPrivileges, (list, tuple)):
+            loginPrivileges = ",".join(loginPrivileges)
+        return self.call("CreateUser",
+                         {"userName": userName, "privileges": privileges, "fullName": fullName,
+                          "distinguishedName": distinguishedName, "authentication": authentication,
+                          "password": password, "loginPrivileges": loginPrivileges},
+                         autoHandleToken=autoHandleToken)
 
     def SetUserAuthentication(self, userName, authentication, autoHandleToken=None):
         """Set authentication mode of a user
 
-        :param userName:        The user name of the user whose authentication mode should be set.
+        :param userName:        The username of the user whose authentication mode should be set.
         :type userName:         str
         :param authentication:  The authentication mode. Possible values are:
                                 * integrated          Specifies MailStore-integrated authentication. This is the default value.
                                 * directoryServices   Specified Directory Services authentication. If this value is specified,
                                                       the password is stored, but is ignored when the user logs on to MailStore Server.
         :type authentication:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetUserAuthentication", {"userName": userName, "authentication": authentication},
@@ -349,12 +347,12 @@ class BaseClient:
     def SetUserDistinguishedName(self, userName, distinguishedName=None, autoHandleToken=None):
         """Set distinguished name (DN) of a user
 
-        :param userName:            The user name of the user whose distinguished name should be set (or removed).
+        :param userName:            The username of the user whose distinguished name should be set (or removed).
         :type userName:             str
         :param distinguishedName:   (optional) The distinguished name to be set. If this argument is not specified,
                                     the distinguished name of the specified user is removed.
         :type distinguishedName:    str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetUserDistinguishedName", {"userName": userName, "distinguishedName": distinguishedName},
@@ -363,12 +361,12 @@ class BaseClient:
     def SetUserEmailAddresses(self, userName, emailAddresses=None, autoHandleToken=None):
         """Sets the e-mail addresses of a user
 
-        :param userName:        The user name of the user whose e-mail addresses are to be set.
+        :param userName:        The username of the user whose e-mail addresses are to be set.
         :type userName:         str
         :param emailAddresses:  (optional) A comma-separated list of e-mail addresses. The first e-mail address
                                 in the list must be the user's primary e-mail address.
         :type emailAddresses:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         if isinstance(emailAddresses, (list, tuple)):
@@ -379,38 +377,95 @@ class BaseClient:
     def SetUserFullName(self, userName, fullName=None, autoHandleToken=None):
         """Set the full name (display name) of a user
 
-        :param userName:        The user name of the user whose full name (display name) should be set (or removed).
+        :param userName:        The username of the user whose full name (display name) should be set (or removed).
         :type userName:         str
         :param fullName:        (optional) The full name to be set. If this argument is not specified, the full
                                 name of the specified user is removed.
         :type fullName:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetUserFullName", {"userName": userName, "fullName": fullName},
                          autoHandleToken=autoHandleToken)
 
+    def SetUserLoginPrivileges(self, userName, loginPrivileges, autoHandleToken=None):
+        """Sets the login privileges of a user
+
+        :param userName:            The username of the user whose login privileges are to be set.
+        :type userName:             str
+        :param loginPrivileges:     Comma-separated list of login privileges that the user should be granted. Possible values are:
+                                    * none                  The user is granted no login privileges.
+                                                            If specified, this value has to be the only value in the list.
+                                    * windows               Windows Client
+                                    * web                   Web Access
+                                    * outlook               Outlook Add-in
+                                    * windowsCmd            Windows Command Line Client, used for Scheduled Tasks
+                                    * imap                  IMAP
+                                    * api                   Management API, not available in SPE, only available for admins
+        :type loginPrivileges:      str | list | tuple | NoneType
+        :param autoHandleToken:     If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:      bool
+        """
+        if isinstance(loginPrivileges, (list, tuple)):
+            loginPrivileges = ",".join(loginPrivileges)
+
+        # None, False, ""
+        if not loginPrivileges:
+            loginPrivileges = "none"
+        return self.call("SetUserLoginPrivileges", {"userName": userName, "loginPrivileges": loginPrivileges},
+                         autoHandleToken=autoHandleToken)
+
     def SetUserPassword(self, userName, password, autoHandleToken=None):
         """Set password of a user
 
-        :param userName:        The user name of the user whose MailStore Server should be set.
+        :param userName:        The username of the user whose password should be set.
         :type userName:         str
         :param password:        The new password.
         :type password:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetUserPassword", {"userName": userName, "password": password},
                          autoHandleToken=autoHandleToken)
 
-    def SetUserPop3UserNames(self, userName, pop3UserNames=None, autoHandleToken=None):
-        """Sets POP3 user names of a user (used for MailStore Proxy).
+    def InitializeMFA(self, userName, autoHandleToken=None):
+        """Initialize MFA for a user
 
-        :param userName:        The user name of the user whose POP3 user names should be set.
+        :param userName:        The username of the user whose MFA should get initialized.
         :type userName:         str
-        :param pop3UserNames:   (optional) A comma-separated list of POP3 user names that should be set.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("InitializeMFA", {"userName": userName}, autoHandleToken=autoHandleToken)
+
+    def DisableMFA(self, userName, autoHandleToken=None):
+        """Disable MFA for a user
+
+        :param userName:        The username of the user whose MFA should get disabled.
+        :type userName:         str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("DisableMFA", {"userName": userName}, autoHandleToken=autoHandleToken)
+
+    def DeleteAppPasswords(self, userName, autoHandleToken=None):
+        """Deletes all app passwords of a user
+
+        :param userName:        The username of the user whose app passwords should be deleted
+        :type userName:         str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("DeleteAppPasswords", {"userName": userName}, autoHandleToken=autoHandleToken)
+
+    def SetUserPop3UserNames(self, userName, pop3UserNames=None, autoHandleToken=None):
+        """Sets POP3 usernames of a user (used for MailStore Proxy).
+
+        :param userName:        The username of the user whose POP3 usernames should be set.
+        :type userName:         str
+        :param pop3UserNames:   (optional) A comma-separated list of POP3 usernames that should be set.
         :type pop3UserNames:    str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         if isinstance(pop3UserNames, (list, tuple)):
@@ -421,7 +476,7 @@ class BaseClient:
     def SetUserPrivileges(self, userName, privileges, autoHandleToken=None):
         """Set the privileges of a user
 
-        :param userName:        The user name of the user whose global privileges should be set.
+        :param userName:        The username of the user whose global privileges should be set.
         :type userName:         str
         :param privileges:      Comma-separated list of global privileges that the user should be granted. Possible values are:
                                 * none                   The user is granted no global privileges.
@@ -441,7 +496,7 @@ class BaseClient:
                                                          effect, preventing administrators and normal users from deleting messages
                                                          even when they have been granted the privilege to do so.
         :type privileges:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         if isinstance(privileges, (list, tuple)):
@@ -454,11 +509,11 @@ class BaseClient:
         The user's archive will not be renamed by this method.
         Use the MoveFolder and SetUserPrivilegesOnFolder methods to move the archive as well.
 
-        :param oldUserName:     User name of the user to be renamed.
+        :param oldUserName:     Username of the user to be renamed.
         :type oldUserName:      str
-        :param newUserName:     New user name.
+        :param newUserName:     New username.
         :type newUserName:      str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RenameUser", {"oldUserName": oldUserName, "newUserName": newUserName},
@@ -468,9 +523,9 @@ class BaseClient:
         """Delete a user
         Neither the user's archive nor the user's archived e-mail are deleted when deleting a user.
 
-        :param userName:        The user name of the user to be deleted.
+        :param userName:        The username of the user to be deleted.
         :type userName:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteUser", {"userName": userName}, autoHandleToken=autoHandleToken)
@@ -478,7 +533,7 @@ class BaseClient:
     def SetUserPrivilegesOnFolder(self, userName, folder, privileges, autoHandleToken=None):
         """Set user's privileges on a specific folder
 
-        :param userName:    The user name of the user who should be granted or denied privileges.
+        :param userName:    The username of the user who should be granted or denied privileges.
         :type userName:     str
         :param folder:      The folder on which the user should be granted or denied privileges.
                             In the current version, this can only be a top-level folder (user archive).
@@ -489,7 +544,7 @@ class BaseClient:
                             * write   The user is granted write access to the specified folder.
                             * delete  The user is granted delete access to the specified folder.
         :type privileges:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         if isinstance(privileges, (list, tuple)):
@@ -501,9 +556,9 @@ class BaseClient:
     def ClearUserPrivilegesOnFolders(self, userName, autoHandleToken=None):
         """ Removes all privileges that a user has on archive folders.
 
-        :param userName:        The user name of the user whose privileges on archive folders should be removed.
+        :param userName:        The username of the user whose privileges on archive folders should be removed.
         :type userName:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("ClearUserPrivilegesOnFolders", {"userName": userName}, autoHandleToken=autoHandleToken)
@@ -515,7 +570,7 @@ class BaseClient:
     def GetDirectoryServicesConfiguration(self, autoHandleToken=None):
         """Retrieve the current directory service configuration
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetDirectoryServicesConfiguration", autoHandleToken=autoHandleToken)
@@ -526,10 +581,11 @@ class BaseClient:
 
         :param config:          Raw configuration object.
         :type config:           dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetDirectoryServicesConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
+        return self.call("SetDirectoryServicesConfiguration", {"config": json.dumps(config)},
+                         autoHandleToken=autoHandleToken)
 
     def SyncUsersWithDirectoryServices(self, dryRun=False, autoHandleToken=None):
         """Synchronizes with currently configured directory service
@@ -537,11 +593,23 @@ class BaseClient:
         :param dryRun:          if set, only retrieve changes from the directory service synchronization
                                 but do not store them in the user database.
         :type dryRun:           bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SyncUsersWithDirectoryServices", {"dryRun": json.dumps(dryRun)},
                          autoHandleToken=autoHandleToken)
+
+    # ---------------------------------------------------------------- #
+    # Credentials                                                      #
+    # ---------------------------------------------------------------- #
+
+    def GetCredentials(self, autoHandleToken=None):
+        """Retrieve information about credentials stored in the credential manager
+
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("GetCredentials", autoHandleToken=autoHandleToken)
 
     # ---------------------------------------------------------------- #
     # Compliance                                                       #
@@ -550,7 +618,7 @@ class BaseClient:
     def GetComplianceConfiguration(self, autoHandleToken=None):
         """Retrieve the current compliance configuration
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetComplianceConfiguration", autoHandleToken=autoHandleToken)
@@ -560,7 +628,7 @@ class BaseClient:
 
         :param config:          Raw configuration object. Use GetComplianceConfiguration to retrieve a valid object.
         :type config:           dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetComplianceConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
@@ -572,7 +640,7 @@ class BaseClient:
     def GetRetentionPolicies(self, autoHandleToken=None):
         """Retrieve retention policies
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetRetentionPolicies", autoHandleToken=autoHandleToken)
@@ -583,7 +651,7 @@ class BaseClient:
         :param config:          The retention policy configuration object. Use GetRetentionPolicies to retrieve the
                                 currently set configuration.
         :type config:           dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetRetentionPolicies", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
@@ -591,7 +659,7 @@ class BaseClient:
     def ProcessRetentionPolicies(self, autoHandleToken=None):
         """Process retention policies
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("ProcessRetentionPolicies", autoHandleToken=autoHandleToken)
@@ -604,7 +672,7 @@ class BaseClient:
         """Retrieve SMTP settings
         The returned password property is always None.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetSmtpSettings", autoHandleToken=autoHandleToken)
@@ -614,7 +682,7 @@ class BaseClient:
 
         :param settings:        The settings object. Use GetSmtpSettings to get the object structure and its properties.
         :type settings:         dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetSmtpSettings", {"settings": json.dumps(settings)}, autoHandleToken=autoHandleToken)
@@ -622,7 +690,7 @@ class BaseClient:
     def TestSmtpSettings(self, autoHandleToken=None):
         """Test SMTP settings by sending a test message
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("TestSmtpSettings", autoHandleToken=autoHandleToken)
@@ -633,10 +701,10 @@ class BaseClient:
 
     def MaintainFileSystemDatabases(self, autoHandleToken=None):
         """Runs maintenance on all file system based databases
-        Each Firebird embedded database file (Master and Archive Stores) will be rebuild by this operation
+        Each Firebird embedded database file (Master and Archive Stores) will be rebuilt by this operation
         by creating a backup file and restoring from that backup file.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("MaintainFileSystemDatabases", autoHandleToken=autoHandleToken)
@@ -644,7 +712,7 @@ class BaseClient:
     def RefreshAllStoreStatistics(self, autoHandleToken=None):
         """Refresh statistics of all attached archive stores
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RefreshAllStoreStatistics", autoHandleToken=autoHandleToken)
@@ -652,7 +720,7 @@ class BaseClient:
     def RetryOpenStores(self, autoHandleToken=None):
         """Retry opening stores that could not be opened the last time
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RetryOpenStores", autoHandleToken=autoHandleToken)
@@ -666,7 +734,7 @@ class BaseClient:
 
         :param includeSize:     Includes the size of the archive store. May be slow when running on slow hardware.
         :type includeSize:      bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetStores", {"includeSize": json.dumps(includeSize)}, autoHandleToken=autoHandleToken)
@@ -674,7 +742,7 @@ class BaseClient:
     def CreateStore(self, name=None, type=None, databasePath=None, contentPath=None, indexPath=None,
                     serverName=None, userName=None, password=None, databaseName=None, requestedState=None,
                     autoHandleToken=None):
-        """Creates a new archive store and attaches it afterwards
+        """Creates a new archive store and attaches it afterward
 
         :param name:            A meaningful name for the archive store. Examples: "Messages 2012" or "2012-01".
         :type name:             str
@@ -683,7 +751,7 @@ class BaseClient:
                                 * SQLServer
                                 * PostgreSQL
         :type type:             str
-        :param databasePath:    Directory containing folder information and email meta data. (FileSystemInternal only)
+        :param databasePath:    Directory containing folder information and email metadata. (FileSystemInternal only)
         :type databasePath:     str
         :param contentPath:     Directory containing email headers and contents.
         :type contentPath:      str
@@ -693,7 +761,7 @@ class BaseClient:
         :type serverName:       str
         :param userName:        Username for database access (MS SQL Server and PostgreSQL only)
         :type userName:         str
-        :param password:        Password for database access MS SQL Server and PostgreSQL only)
+        :param password:        Password for database access (MS SQL Server and PostgreSQL only)
         :type password:         str
         :param databaseName:    Name of SQL database containing folder information and e-mail metadata.
         :type databaseName:     str
@@ -703,20 +771,20 @@ class BaseClient:
                                 * writeProtected  The archive store should be write-protected.
                                 * disabled        The archive store should be disabled. This causes the archive store to be closed if it is currently open.
         :type requestedState:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("CreateStore", {"name": name, "type": type, "databasePath": databasePath, "contentPath": contentPath,
-                           "indexPath": indexPath, "serverName": serverName, "userName": userName,
-                           "password": password,
-                           "databaseName": databaseName, "requestedState": requestedState},
+        return self.call("CreateStore",
+                         {"name": name, "type": type, "databasePath": databasePath, "contentPath": contentPath,
+                          "indexPath": indexPath, "serverName": serverName, "userName": userName,
+                          "password": password, "databaseName": databaseName, "requestedState": requestedState},
                          autoHandleToken=autoHandleToken)
 
     def AttachStore(self, name, type=None, databasePath=None, contentPath=None, indexPath=None,
                     serverName=None, userName=None, password=None, databaseName=None, requestedState=None,
                     autoHandleToken=None):
         """Attaches an existing archive store
-        
+
         :param name:            A meaningful name for the archive store. Examples: "Messages 2012" or "2012-01".
         :type name:             str
         :param type:            Type of archive store. Must be one of the following:
@@ -725,7 +793,7 @@ class BaseClient:
                                 * PostgreSQL
                                 The SPE only supports FileSystemInternal and the type must not be given.
         :type type:             str
-        :param databasePath:    Directory containing folder information and email meta data. (FileSystemInternal only)
+        :param databasePath:    Directory containing folder information and email metadata. (FileSystemInternal only)
         :type databasePath:     str
         :param contentPath:     Directory containing email headers and contents.
         :type contentPath:      str
@@ -735,17 +803,17 @@ class BaseClient:
         :type serverName:       str
         :param userName:        Username for database access (MS SQL Server and PostgreSQL only)
         :type userName:         str
-        :param password:        Password for database access MS SQL Server and PostgreSQL only)
+        :param password:        Password for database access (MS SQL Server and PostgreSQL only)
         :type password:         str
         :param databaseName:    Name of SQL database containing folder information and e-mail metadata.
         :type databaseName:     str
-        :param requestedState:  Status of the archive store after attaching. Must be one of the follwing
+        :param requestedState:  Status of the archive store after attaching. Must be one of the following
                                 * current         New email messages should be archived into this store.
                                 * normal          The archive store should be opened normally. Write access is possible, but new email messages are not archived into this store.
                                 * writeProtected  The archive store should be write-protected.
                                 * disabled        The archive store should be disabled. This causes the archive store to be closed if it is currently open.
         :type requestedState:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("AttachStore", {"name": name, "type": type, "databaseName": databaseName,
@@ -766,7 +834,7 @@ class BaseClient:
                                 * writeProtected  The archive store should be write-protected.
                                 * disabled        The archive store should be disabled. This causes the archive store to be closed if it is currently open.
         :type requestedState:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetStoreRequestedState", {"id": id, "requestedState": requestedState},
@@ -779,7 +847,7 @@ class BaseClient:
         :type id:               int
         :param name:            The new archive store name.
         :type name:             str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RenameStore", {"id": id, "name": name}, autoHandleToken=autoHandleToken)
@@ -789,7 +857,7 @@ class BaseClient:
 
         :param id:              This unique identifier of the archive store to be detached.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DetachStore", {"id": id}, autoHandleToken=autoHandleToken)
@@ -799,20 +867,20 @@ class BaseClient:
 
         :param id:              Unique ID of the  archive store to compact
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CompactStore", {"id": id}, autoHandleToken=autoHandleToken)
 
     def MergeStore(self, id, sourceId, autoHandleToken=None):
         """Merge two archive stores.
-        The source archive store remains unchanged and should be detached afterwards.
+        The source archive store remains unchanged and should be detached afterward.
 
         :param id:              Unique identifier of destination archive store
         :type id:               int
         :param sourceId:        Unique identifier of source archive store
         :type sourceId:         int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("MergeStore", {"id": id, "sourceId": sourceId}, autoHandleToken=autoHandleToken)
@@ -829,7 +897,7 @@ class BaseClient:
         :param recoverDeletedMessages:  (optional) Defines whether to recover deleted messages
                                         when the recovery records have not been compacted yet-.
         :type recoverDeletedMessages:   str
-        :param autoHandleToken:         If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken:         If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:          bool
         """
         return self.call("RecoverStore", {"id": id,
@@ -844,7 +912,7 @@ class BaseClient:
 
         :param id:              The unique identifier of the archive store.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RecreateRecoveryRecords", {"id": id}, autoHandleToken=autoHandleToken)
@@ -856,7 +924,7 @@ class BaseClient:
 
         :param id:              The unique identifier of the archive store.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RepairStoreDatabase", {"id": id}, autoHandleToken=autoHandleToken)
@@ -865,13 +933,13 @@ class BaseClient:
         """Unlock a foreign archive store
 
         In case an archive store from a foreign MailStore installation is attached,
-        this method must used to unlock that archive store.
+        this method must be used to unlock that archive store.
 
         :param id:              The unique identifier of the archive store to be unlocked.
         :type id:               int
         :param passphrase:      The product key or recovery key of the foreign MailStore installation.
         :type passphrase:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("UnlockStore", {"id": id, "passphrase": passphrase}, autoHandleToken=autoHandleToken)
@@ -882,19 +950,28 @@ class BaseClient:
 
         :param id:              The unique identifier of the archive store to be upgraded.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("UpgradeStore", {"id": id}, autoHandleToken=autoHandleToken)
+
+    def UpgradeStores(self, autoHandleToken=None):
+        """Upgrade all archive stores
+        When archive stores need an upgrade, this method can be used to start this upgrade process.
+
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("UpgradeStores", autoHandleToken=autoHandleToken)
 
     def VerifyStore(self, id, includeIndexes=True, autoHandleToken=None):
         """Verify archive store consistency
 
         :param id:              The unique identifier of the archive store to be verified.
         :type id:               int
-        :param includeIndexes:  Specifies whether the search index files be verfied.
+        :param includeIndexes:  Specifies whether the search index files be verified.
         :type includeIndexes:   bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("VerifyStore", {"id": id, "includeIndexes": json.dumps(includeIndexes)},
@@ -903,9 +980,9 @@ class BaseClient:
     def VerifyStores(self, includeIndexes=True, autoHandleToken=None):
         """Verify consistency of all archive stores
 
-        :param includeIndexes:  Specifies whether the search index files be verfied.
+        :param includeIndexes:  Specifies whether the search index files be verified.
         :type includeIndexes:   bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("VerifyStores", {"includeIndexes": json.dumps(includeIndexes)},
@@ -918,7 +995,7 @@ class BaseClient:
     def GetStoreAutoCreateConfiguration(self, autoHandleToken=None):
         """Get automatic archive store creation settings.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetStoreAutoCreateConfiguration", autoHandleToken=autoHandleToken)
@@ -928,10 +1005,11 @@ class BaseClient:
 
         :param config:          Archive store automatic creation configuration.
         :type config:           dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetStoreAutoCreateConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
+        return self.call("SetStoreAutoCreateConfiguration", {"config": json.dumps(config)},
+                         autoHandleToken=autoHandleToken)
 
     # ---------------------------------------------------------------- #
     # Search Indexes                                                   #
@@ -940,7 +1018,7 @@ class BaseClient:
     def SelectAllStoreIndexesForRebuild(self, autoHandleToken=None):
         """Select all full text indexes for rebuild
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SelectAllStoreIndexesForRebuild", autoHandleToken=autoHandleToken)
@@ -948,7 +1026,7 @@ class BaseClient:
     def RebuildSelectedStoreIndexes(self, autoHandleToken=None):
         """Rebuild all full-text indexes selected for rebuild
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RebuildSelectedStoreIndexes", autoHandleToken=autoHandleToken)
@@ -960,7 +1038,7 @@ class BaseClient:
     def GetJobs(self, autoHandleToken=None):
         """Retrieve list of jobs
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetJobs", autoHandleToken=autoHandleToken)
@@ -978,7 +1056,7 @@ class BaseClient:
         :type timeZoneId:       str
         :param jobId:           The job id for which to retrieve results.
         :type jobId:            int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetJobResults",
@@ -1011,7 +1089,7 @@ class BaseClient:
         :param dayOfMonth:      Day of month to run job. Parameter "time" also required. dayOfWeek can optionally be used to define further.
                                 Allowed values is 1 to 31 and "last".
         :type dayOfMonth:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateJob",
@@ -1027,7 +1105,7 @@ class BaseClient:
         :type id:               int
         :param name:            The new job name.
         :type name:             str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RenameJob", {"id": id, "name": name}, autoHandleToken=autoHandleToken)
@@ -1039,7 +1117,7 @@ class BaseClient:
         :type id:               int
         :param enabled:         Boolean value of "enabled" attribute.
         :type enabled:          bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetJobEnabled", {"id": id, "enabled": json.dumps(enabled)}, autoHandleToken=autoHandleToken)
@@ -1065,7 +1143,7 @@ class BaseClient:
         :type dayOfWeek:        str
         :param dayOfMonth:      (optional) Day of month to run job. Parameter "time" also required. dayOfWeek can optionally be used to define further. Allowed values is 1 to 31 and "Last".
         :type dayOfMonth:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetJobSchedule",
@@ -1078,19 +1156,19 @@ class BaseClient:
 
         :param id:              The unique identifier of the job to be deleted
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteJob", {"id": id}, autoHandleToken=autoHandleToken)
 
     def RunJobAsync(self, id, autoHandleToken=None):
         """Run existing job
-        Using this method will trigger the asynchronous execution of a previously created job. Thus this method does not
+        Using this method will trigger the asynchronous execution of a previously created job. Thus, this method does not
         wait for the triggered job to finish. Use GetJobResults to retrieve status of jobs.
 
         :param id:              The identifier of the job to be run.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RunJobAsync", {"id": id}, autoHandleToken=autoHandleToken)
@@ -1100,7 +1178,7 @@ class BaseClient:
 
         :param id:              Unique ID of the job to be canceled.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CancelJobAsync", {"id": id}, autoHandleToken=autoHandleToken)
@@ -1114,16 +1192,10 @@ class BaseClient:
 
         :param raw:             Defines whether raw profile data is returned. Currently only True is supported
         :type raw:              bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetProfiles", {"raw": json.dumps(raw)}, autoHandleToken=autoHandleToken)
-
-    def SetProfileServerSideExecution(self, automatic=True, automaticPauseBetweenExecutions=None, automaticMaintenanceWindow=None, autoHandleToken=None):
-        """just added this to get rid of
-        ERROR    mgmt._self_test() [122]: Client does not implement server method 'SetProfileServerSideExecution'
-        """
-        return self.call("SetProfileServerSideExecution", {"id": id}, autoHandleToken=autoHandleToken)
 
     def GetWorkerResults(self, fromIncluding, toExcluding, timeZoneID="$Local", profileID=None, userName=None,
                          autoHandleToken=None):
@@ -1133,20 +1205,30 @@ class BaseClient:
         :param fromIncluding:   The date which indicates the beginning time, e.g. "2017-01-01T00:00:00".
         :type fromIncluding:    str
         :param toExcluding:     The date which indicates the ending time, e.g. "2018-01-01T00:00:00".
-        :type toExcluding       str
+        :type toExcluding:      str
         :param timeZoneID:      The time zone the date should be converted to, e.g. "$Local",
                                 which represents the time zone of the operating system.
         :type timeZoneID:       str
         :param profileID:       The profile id for which to retrieve results.
         :type profileID:        int
-        :param userName:        The user name for which to retrieve results.
+        :param userName:        The username for which to retrieve results.
         :type userName:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetWorkerResults",
                          {"fromIncluding": fromIncluding, "toExcluding": toExcluding, "timeZoneID": timeZoneID,
                           "profileID": profileID, "userName": userName}, autoHandleToken=autoHandleToken)
+
+    def GetWorkerResultReport(self, id, autoHandleToken=None):
+        """Retrieves the report of a profile execution
+
+        :param id:              The id of report to be fetched.
+        :type id:               int
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("GetWorkerResultReport", {"id": id}, autoHandleToken=autoHandleToken)
 
     def CreateProfile(self, properties=None, raw=True, autoHandleToken=None):
         """Create a new archiving or exporting profile.
@@ -1155,7 +1237,7 @@ class BaseClient:
         :type properties:       dict
         :param raw:             Defines whether raw data is sent. Currently only True is supported.
         :type raw:              bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateProfile", {"properties": json.dumps(properties), "raw": json.dumps(raw)},
@@ -1166,7 +1248,7 @@ class BaseClient:
 
         :param id:              The identifier of the profile to be run.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RunProfile", {"id": id}, autoHandleToken=autoHandleToken)
@@ -1180,7 +1262,7 @@ class BaseClient:
         :type properties:       dict
         :param raw:             Defines whether raw profile data is sent. Only True is currently supported.
         :type raw:              bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RunTemporaryProfile", {"properties": json.dumps(properties), "raw": json.dumps(raw)},
@@ -1191,10 +1273,31 @@ class BaseClient:
 
         :param id:              The unique identifier of the profile to be deleted.
         :type id:               int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteProfile", {"id": id}, autoHandleToken=autoHandleToken)
+
+    def SetProfileServerSideExecution(self, id, automatic, automaticPauseBetweenExecutions=None,
+                                      automaticMaintenanceWindows=None, autoHandleToken=None):
+        """Set/Modify the automatic execution settings of a server-sided archiving profile
+
+        :param id:                                 The unique identifier of a profile ID to be addressed.
+        :type id:                                  int
+        :param automatic:                          sets the server-sided execution to automatic (true) or manual (false)
+        :type automatic:                           bool
+        :param automaticPauseBetweenExecutions:    optional: sets the amount of seconds to wait before next automatic execution of finished profile, mandatory if automatic is set to true
+        :type automaticPauseBetweenExecutions:     str
+        :param automaticMaintenanceWindows:        optional: if automatic is set to false, preserves old setting, if automatic is true, sets a time window in which the automation will not be executed, e.g. for maintenance purposes, default is -not set-
+        :type automaticMaintenanceWindows:         str
+        :param autoHandleToken:                    If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:                     bool
+        """
+        return self.call("SetProfileServerSideExecution",
+                         {"id": id, "automatic": json.dumps(automatic),
+                          "automaticPauseBetweenExecutions": automaticPauseBetweenExecutions,
+                          "automaticMaintenanceWindows": automaticMaintenanceWindows},
+                         autoHandleToken=autoHandleToken)
 
     # ---------------------------------------------------------------- #
     # Folders                                                          #
@@ -1203,7 +1306,7 @@ class BaseClient:
     def GetFolderStatistics(self, autoHandleToken=None):
         """Retrieve folder statistics
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetFolderStatistics", autoHandleToken=autoHandleToken)
@@ -1219,7 +1322,7 @@ class BaseClient:
                             which means that you get the whole folder hierarchy starting at the folder specified.
                             Set maxLevels to a value equal to or greater than 1 to limit the levels returned.
         :type maxLevels:    int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetChildFolders", {"folder": folder, "maxLevels": maxLevels}, autoHandleToken=autoHandleToken)
@@ -1231,7 +1334,7 @@ class BaseClient:
         :type fromFolder:       str
         :param toFolder:        The target folder name, e.g. "johndoe/Outlook/Inbox-new".
         :type toFolder:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("MoveFolder", {"fromFolder": fromFolder, "toFolder": toFolder},
@@ -1244,7 +1347,7 @@ class BaseClient:
                                 Folder delimiter is /
                                 If not specified, all empty folders in the entire archive are removed.
         :type folder:           str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteEmptyFolders", {"folder": folder}, autoHandleToken=autoHandleToken)
@@ -1263,7 +1366,7 @@ class BaseClient:
         :type timeZoneId:       str
         :param recipients:      Comma separated list of recipients that will receive the status report.
         :type recipients:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SendStatusReport",
@@ -1274,7 +1377,7 @@ class BaseClient:
         """Retrieve list of all available time zones on the server
         This is particularly useful for the GetWorkerResults and GetJobResults method.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetTimeZones", autoHandleToken=autoHandleToken)
@@ -1285,7 +1388,7 @@ class ServerClient(BaseClient):
                  autoHandleToken=True, waitTime=1000, callback=None, logLevel=2,
                  ignoreInvalidSSLCerts=False):
         super().__init__(username, password, host, port,
-                         autoHandleToken, waitTime, callback, logLevel, ignoreInvalidSSLCerts)
+                         autoHandleToken, waitTime, callback, logLevel, ignoreInvalidSSLCerts, None)
 
         # Only done in ServerClient, because the SPE does not allow unauthorized access
         # to get-metadata and already throws an error when fetching that earlier in __init__
@@ -1311,7 +1414,7 @@ class ServerClient(BaseClient):
         :type path:                     str
         :param excludeSearchIndexes:    Indicates whether the search index files should be excluded from the backup.
         :type excludeSearchIndexes:     bool
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateBackup",
@@ -1321,7 +1424,7 @@ class ServerClient(BaseClient):
     def CompactMasterDatabase(self, autoHandleToken=None):
         """Compacts the master database
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CompactMasterDatabase", autoHandleToken=autoHandleToken)
@@ -1329,7 +1432,7 @@ class ServerClient(BaseClient):
     def RenewMasterKey(self, autoHandleToken=None):
         """Renews the master key which is used to encrypt the encryption keys.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RenewMasterKey", autoHandleToken=autoHandleToken)
@@ -1349,7 +1452,7 @@ class ServerClient(BaseClient):
                                 * SQLServer
                                 * PostgreSQL
         :type type:             str
-        :param databasePath:    Directory containing folder information and email meta data. (FileSystemInternal only)
+        :param databasePath:    Directory containing folder information and email metadata. (FileSystemInternal only)
         :type databasePath:     str
         :param contentPath:     Directory containing email headers and contents.
         :type contentPath:      str
@@ -1359,11 +1462,11 @@ class ServerClient(BaseClient):
         :type serverName:       str
         :param userName:        Username for database access (MS SQL Server and PostgreSQL only)
         :type userName:         str
-        :param password:        Password for database access MS SQL Server and PostgreSQL only)
+        :param password:        Password for database access (MS SQL Server and PostgreSQL only)
         :type password:         str
         :param databaseName:    Name of SQL database containing folder information and e-mail metadata.
         :type databaseName:     str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetStoreProperties",
@@ -1380,7 +1483,7 @@ class ServerClient(BaseClient):
 
         :param id:  The unique identifier of the archive store whose full-text indexes are to be returned.
         :type id:   int
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetStoreIndexes", {"id": id}, autoHandleToken=autoHandleToken)
@@ -1390,9 +1493,9 @@ class ServerClient(BaseClient):
 
         :param id:              The unique identifier of the archive store that contains the full-text index to be rebuilt.
         :type id:               int
-        :param folder:          Name of the archive of which the full-text index should be rebuild e.g. "johndoe".
+        :param folder:          Name of the archive of which the full-text index should be rebuilt e.g. "johndoe".
         :type folder:           str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RebuildStoreIndex", {"id": id, "folder": folder}, autoHandleToken=autoHandleToken)
@@ -1406,7 +1509,7 @@ class ServerClient(BaseClient):
 
         :param folder:          The folder from which to retrieve the message list
         :type folder:           str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetMessages", {"folder": folder}, autoHandleToken=autoHandleToken)
@@ -1418,7 +1521,7 @@ class ServerClient(BaseClient):
         :type id:               str
         :param reason:          The reason why a message has to be deleted.
         :type reason:           str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteMessage", {"id": id, "reason": reason}, autoHandleToken=autoHandleToken)
@@ -1430,7 +1533,7 @@ class ServerClient(BaseClient):
     def GetServerInfo(self, autoHandleToken=None):
         """Retrieve list of general server information
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetServerInfo", autoHandleToken=autoHandleToken)
@@ -1438,15 +1541,25 @@ class ServerClient(BaseClient):
     def GetServiceConfiguration(self, autoHandleToken=None):
         """Retrieve service configuration
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetServiceConfiguration", autoHandleToken=autoHandleToken)
 
+    def SetServiceCertificate(self, thumbprint, autoHandleToken=None):
+        """Set the X509 certificate used by the server for incoming TLS encrypted connections
+
+        :param thumbprint:      Thumbprint of X509 certificate to use.
+        :type thumbprint:       str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("SetServiceCertificate", {"thumbprint": thumbprint}, autoHandleToken=autoHandleToken)
+
     def GetActiveSessions(self, autoHandleToken=None):
         """Retrieve list of active logon sessions
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetActiveSessions", autoHandleToken=autoHandleToken)
@@ -1454,7 +1567,7 @@ class ServerClient(BaseClient):
     def GetLicenseInformation(self, autoHandleToken=None):
         """Retrieve license information
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetLicenseInformation", autoHandleToken=autoHandleToken)
@@ -1465,9 +1578,7 @@ class SPEClient(BaseClient):
                  autoHandleToken=True, waitTime=1000, callback=None, logLevel=2,
                  ignoreInvalidSSLCerts=False, instanceID=None):
         super().__init__(username, password, host, port,
-                         autoHandleToken, waitTime, callback, logLevel, ignoreInvalidSSLCerts)
-        # Default instanceId for SPE connections
-        self.instanceID = instanceID
+                         autoHandleToken, waitTime, callback, logLevel, ignoreInvalidSSLCerts, instanceID)
 
     # ---------------------------------------------------------------- #
     # MailStore SPE specific API methods                               #
@@ -1480,7 +1591,7 @@ class SPEClient(BaseClient):
     def GetEnvironmentInfo(self, autoHandleToken=None):
         """Return general information about SPE environment.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetEnvironmentInfo", autoHandleToken=autoHandleToken)
@@ -1488,7 +1599,7 @@ class SPEClient(BaseClient):
     def GetServiceStatus(self, autoHandleToken=None):
         """Get current status of all SPE services.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetServiceStatus", autoHandleToken=autoHandleToken)
@@ -1504,7 +1615,7 @@ class SPEClient(BaseClient):
         :type port:             str
         :param thumbprint:      Thumbprint of SSL certificate used by serverType' role on 'serverName'.
         :type thumbprint:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("PairWithManagementServer",
@@ -1522,7 +1633,7 @@ class SPEClient(BaseClient):
         :type withServiceStatus:    bool
         :param serverNameFilter:    Server name filter string.
         :type serverNameFilter:     str
-        :param autoHandleToken:     If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken:     If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:      bool
         """
         return self.call("GetClientAccessServers",
@@ -1534,7 +1645,7 @@ class SPEClient(BaseClient):
 
         :param config:          Configuration of new client access server
         :type config:           str  (JSON)
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateClientAccessServer", {"config": config}, autoHandleToken=autoHandleToken)
@@ -1544,7 +1655,7 @@ class SPEClient(BaseClient):
 
         :param config:          Client Access Server configuration.
         :type config:           str (JSON)
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetClientAccessServerConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
@@ -1554,7 +1665,7 @@ class SPEClient(BaseClient):
 
         :param serverName:      Name of Client Access Server.
         :type serverName:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteClientAccessServer", {"serverName": serverName}, autoHandleToken=autoHandleToken)
@@ -1568,7 +1679,7 @@ class SPEClient(BaseClient):
 
         :param serverNameFilter: Server name filter string.
         :type serverNameFilter:  str
-        :param autoHandleToken:  If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken:  If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:   bool
         """
         return self.call("GetInstanceHosts", {"serverNameFilter": serverNameFilter}, autoHandleToken=autoHandleToken)
@@ -1578,7 +1689,7 @@ class SPEClient(BaseClient):
 
         :param config:          Configuration of new Instance Host.
         :type config:           str (JSON)
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateInstanceHost", {"config": config}, autoHandleToken=autoHandleToken)
@@ -1588,7 +1699,7 @@ class SPEClient(BaseClient):
 
         :param config:          Instance Host configuration.
         :type config:           str (JSON)
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetInstanceHostConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
@@ -1597,10 +1708,10 @@ class SPEClient(BaseClient):
         """Get file system directory structure from Instance Host.
 
         :param serverName:      Name of Instance Host.
-        :type serverName        str
+        :type serverName:       str
         :param path:            Path of directory to obtain subdirectories from.
         :type path:             str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetDirectoriesOnInstanceHost", {"serverName": serverName, "path": path},
@@ -1613,7 +1724,7 @@ class SPEClient(BaseClient):
         :type serverName:       str
         :param path:            Path of directory to create.
         :type path:             str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         this can be used to create empty directories for new instances"""
         return self.call("CreateDirectoryOnInstanceHost", {"serverName": serverName, "path": path},
@@ -1624,7 +1735,7 @@ class SPEClient(BaseClient):
 
         :param serverName:      Name of Client Access Server.
         :type serverName:       str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteInstanceHost", {"serverName": serverName}, autoHandleToken=autoHandleToken)
@@ -1638,7 +1749,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string.
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1646,9 +1757,9 @@ class SPEClient(BaseClient):
     def CreateInstance(self, config, autoHandleToken=None):
         """Creates new instance.
 
-        :param config           Configuration of new Instance Host
+        :param config:          Configuration of new Instance Host
         :type  config:          str (JSON)
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateInstance", {"config": config}, autoHandleToken=autoHandleToken)
@@ -1656,7 +1767,7 @@ class SPEClient(BaseClient):
     def GetInstanceConfiguration(self, autoHandleToken=None):
         """Get configuration of MailStore Instance.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetInstanceConfiguration", autoHandleToken=autoHandleToken)
@@ -1666,7 +1777,7 @@ class SPEClient(BaseClient):
 
         :param config:          Instance configuration.
         :type config:           str (JSON)
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetInstanceConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
@@ -1676,7 +1787,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("StartInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1686,7 +1797,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("RestartInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1696,7 +1807,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("StopInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1706,7 +1817,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string.
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("FreezeInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1716,7 +1827,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string.
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("ThawInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1724,7 +1835,7 @@ class SPEClient(BaseClient):
     def GetInstanceStatistics(self, autoHandleToken=None):
         """Get archive statistics from instance.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetInstanceStatistics", autoHandleToken=autoHandleToken)
@@ -1732,7 +1843,7 @@ class SPEClient(BaseClient):
     def GetInstanceProcessLiveStatistics(self, autoHandleToken=None):
         """Get live statistics from Instance process.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetInstanceProcessLiveStatistics", autoHandleToken=autoHandleToken)
@@ -1742,7 +1853,7 @@ class SPEClient(BaseClient):
 
         :param instanceFilter:  Instance filter string
         :type instanceFilter:   str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteInstances", {"instanceFilter": instanceFilter}, autoHandleToken=autoHandleToken)
@@ -1754,7 +1865,7 @@ class SPEClient(BaseClient):
     def GetArchiveAdminEnabled(self, autoHandleToken=None):
         """Get current state of archive admin access.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetArchiveAdminEnabled", autoHandleToken=autoHandleToken)
@@ -1764,7 +1875,7 @@ class SPEClient(BaseClient):
 
         :param enabled:          Enable or disable flag.
         :type enabled:           bool
-         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
          :type autoHandleToken:  bool
         """
         return self.call("SetArchiveAdminEnabled", {"enabled": json.dumps(enabled)}, autoHandleToken=autoHandleToken)
@@ -1774,10 +1885,11 @@ class SPEClient(BaseClient):
 
         :param instanceUrl:     Base URL for accessing instance.
         :type instanceUrl:      str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("CreateClientOneTimeUrlForArchiveAdmin", {"instanceUrl": instanceUrl}, autoHandleToken=autoHandleToken)
+        return self.call("CreateClientOneTimeUrlForArchiveAdmin", {"instanceUrl": instanceUrl},
+                         autoHandleToken=autoHandleToken)
 
     # ---------------------------------------------------------------- #
     # Storage                                                          #
@@ -1786,7 +1898,7 @@ class SPEClient(BaseClient):
     def CanRunArchiveProfiles(self, autoHandleToken=None):
         """Checks whether and instance can run archive profiles
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CanRunArchiveProfiles", autoHandleToken=autoHandleToken)
@@ -1801,8 +1913,8 @@ class SPEClient(BaseClient):
         :param id:              Unique ID of archive store.
         :type id:               int
         :param path:            Path to archive store data.
-        :type path              str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :type path:             str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetStorePath", {"id": id, "path": path}, autoHandleToken=autoHandleToken)
@@ -1814,7 +1926,7 @@ class SPEClient(BaseClient):
     def GetIndexConfiguration(self, autoHandleToken=None):
         """Get list of attachment file types to index.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetIndexConfiguration", autoHandleToken=autoHandleToken)
@@ -1824,7 +1936,7 @@ class SPEClient(BaseClient):
 
         :param config:          Full text search index configuration
         :type config            dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetIndexConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
@@ -1836,7 +1948,7 @@ class SPEClient(BaseClient):
     def GetSystemAdministrators(self, autoHandleToken=None):
         """Get list of system administrators.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetSystemAdministrators", autoHandleToken=autoHandleToken)
@@ -1848,7 +1960,7 @@ class SPEClient(BaseClient):
         :type config:           dict
         :param password:        Password of new SPE system administrator.
         :type password:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("CreateSystemAdministrator", {"config": json.dumps(config), "password": password},
@@ -1859,19 +1971,20 @@ class SPEClient(BaseClient):
 
         :param config:          The config object. Use GetSystemAdministrators to get the object structure and its properties.
         :type config:           dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetSystemAdministratorConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
+        return self.call("SetSystemAdministratorConfiguration", {"config": json.dumps(config)},
+                         autoHandleToken=autoHandleToken)
 
     def SetSystemAdministratorPassword(self, userName, password, autoHandleToken=None):
         """Set password for SPE system administrator.
 
-        :param userName:        User name of SPE system administrator.
+        :param userName:        Username of SPE system administrator.
         :type userName:         str
         :param password:        New password for SPE system administrator.
         :type password:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetSystemAdministratorPassword", {"userName": userName, "password": password},
@@ -1880,39 +1993,75 @@ class SPEClient(BaseClient):
     def DeleteSystemAdministrator(self, userName, autoHandleToken=None):
         """Delete SPE system administrator.
 
-        :param userName:        User name of SPE system administrator.
+        :param userName:        Username of SPE system administrator.
         :type userName:         str
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("DeleteSystemAdministrator", {"userName": userName}, autoHandleToken=autoHandleToken)
+
+    # ---------------------------------------------------------------- #
+    # System Administrators MFA Settings                               #
+    # ---------------------------------------------------------------- #
+
+    def InitializeSystemAdministratorMFA(self, userName, autoHandleToken=None):
+        """Initialize MFA for an SPE system administrator.
+        In case MFA has been finalized already, a new secret will be generated and the setup has to be completed again after the next login.
+
+        :param userName:        Username of SPE system administrator.
+        :type userName:         str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("InitializeSystemAdministratorMFA", {"userName": userName}, autoHandleToken=autoHandleToken)
+
+    def DeactivateSystemAdministratorMFA(self, userName, autoHandleToken=None):
+        """Deactivate MFA for an SPE system administrator.
+
+        :param userName:        Username of SPE system administrator.
+        :type userName:         str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("DeactivateSystemAdministratorMFA", {"userName": userName}, autoHandleToken=autoHandleToken)
+
+    def CreateSystemAdministratorAPIPassword(self, autoHandleToken=None):
+        """Creates a new API password for the current administrator. This password can only be used for the API.
+        When MFA is enabled, only this password can be used when using the API.
+        When MFA is disabled, this password and the regular password can be used.
+        There can only be one API password per user and generating a new one will overwrite the existing one.
+
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        return self.call("CreateSystemAdministratorAPIPassword", autoHandleToken=autoHandleToken)
 
     # ---------------------------------------------------------------- #
     # System SMTP Settings                                             #
     # ---------------------------------------------------------------- #
 
     def GetSystemSmtpConfiguration(self, autoHandleToken=None):
-        """Retrieve system wide SMTP settings. The password property is always None.
+        """Retrieve system-wide SMTP settings. The password property is always None.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("GetSystemSmtpConfiguration", autoHandleToken=autoHandleToken)
 
     def SetSystemSmtpConfiguration(self, config, autoHandleToken=None):
-        """ Set system wide SMTP settings
+        """ Set system-wide SMTP settings
 
         :param config:          The config object. Use GetSystemSmtpSettings to get the object structure and its properties.
         :type config:           dict
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("SetSystemSmtpConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
 
     def TestSystemSmtpConfiguration(self, autoHandleToken=None):
-        """Test system wide SMTP settings by sending a test message.
+        """Test system-wide SMTP settings by sending a test message.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("TestSystemSmtpConfiguration", autoHandleToken=autoHandleToken)
@@ -1924,7 +2073,7 @@ class SPEClient(BaseClient):
     def CreateLicenseRequest(self, autoHandleToken=None):
         """Create and return data of a license request.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type  autoHandleToken:  bool
         """
         return self.call("CreateLicenseRequest", autoHandleToken=autoHandleToken)
@@ -1932,7 +2081,7 @@ class SPEClient(BaseClient):
     def Ping(self, autoHandleToken=None):
         """Send a keep alive packet.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("Ping", autoHandleToken=autoHandleToken)
@@ -1940,7 +2089,7 @@ class SPEClient(BaseClient):
     def ReloadBranding(self, autoHandleToken=None):
         """Reloads the branding.
 
-        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long running tasks, but instead has to wait for the result.
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
         return self.call("ReloadBranding", autoHandleToken=autoHandleToken)

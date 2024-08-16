@@ -36,9 +36,9 @@ REPOSITORY='https://raw.githubusercontent.com/tribe29/checkMK/master/agents/plug
 PLUGINS=""
 
 # check if wget returns 0
-if wget -q -o /dev/null "${source}"; then
-  wget -q -o "${scriptpath}/${bin}" "${source}"
-  chmod +x "${scriptpath}/${bin}"
+if wget -q -o /dev/null "${SOURCE}"; then
+  wget -q -o "${SCRIPTPATH}/${BIN}" "${SOURCE}"
+  chmod +x "${SCRIPTPATH}/${BIN}"
 fi
 
 INETD_LINE="checkmk stream tcp nowait root $SCRIPTPATH/$BIN check_mk_agent"

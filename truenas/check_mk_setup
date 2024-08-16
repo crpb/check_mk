@@ -17,7 +17,7 @@
 #  ORGANIZATION: 
 #       CREATED: 07/17/2018 05:54:02 PM
 #       UPDATED: 08/16/2024 15:31:34 9M
-#      REVISION: 2.7
+#      REVISION: 2.8
 #===============================================================================
 
 set -o nounset                              # Treat unset variables as an error
@@ -36,8 +36,8 @@ REPOSITORY='https://raw.githubusercontent.com/tribe29/checkMK/master/agents/plug
 PLUGINS=""
 
 # check if wget returns 0
-if wget -q -o /dev/null "${SOURCE}"; then
-  wget -q -o "${SCRIPTPATH}/${BIN}" "${SOURCE}"
+if wget -q -O /dev/null "${SOURCE}"; then
+  wget -q -O "${SCRIPTPATH}/${BIN}" "${SOURCE}"
   chmod +x "${SCRIPTPATH}/${BIN}"
 fi
 
@@ -54,12 +54,12 @@ grep -qxF -- "check_mk_agent: ALL" "/etc/hosts.deny" || echo "check_mk_agent: AL
 
 killall -HUP inetd
 
-sed -i '' 's|export MK_LIBDIR="/usr/local/lib/check_mk_agent"|export MK_LIBDIR="'"${SCRIPTPATH}"'/check_mk_plugins"|g' "${SCRIPTPATH}/${BIN}"
+sed -i '' 's|: "${MK_LIBDIR:=/usr/local/lib/check_mk_agent}"|: "${MK_LIBDIR:='"${SCRIPTPATH}"'/check_mk_plugins}"|g' "${SCRIPTPATH}/${BIN}"
 
 for plugin in $PLUGINS;
 do
   mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins"
-  $BIN_WGET -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}" "${REPOSITORY}/${plugin}"
+  wget -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}" "${REPOSITORY}/${plugin}"
   chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}"
 done
 
@@ -67,12 +67,16 @@ mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
 wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 
+midclt call service.update tftp '{"enable": true}'
+midclt call service.start tftp
+midclt call service.restart tftp
+
 # Insert Cron job
 CMKPATH=$(awk '/check_mk_agent/{print$6}' /etc/inetd.conf)
 CMKPATH=${CMKPATH%/*}
 CRON=$(midclt call cronjob.query |jq '.[]|select(.command|endswith("check_mk_setup"))|.id')
-if test -z $CRON; then
-  midclt call cronjob.create '{
+if [[ -z $CRON ]]; then
+midclt call cronjob.create '{
   "user": "root",
   "command": "'$CMKPATH'/check_mk_setup",
   "description": "checkmk_update",
@@ -80,10 +84,10 @@ if test -z $CRON; then
   "stdout": true,
   "stderr": false,
   "schedule": {
-  "minute": "0",
-  "hour": "*/6",
-  "dom": "*",
-  "month": "*",
-  "dow": "*"
-}}'
+    "minute": "0",
+    "hour": "*/6",
+    "dom": "*",
+    "month": "*",
+    "dow": "*"
+  }}'
 fi

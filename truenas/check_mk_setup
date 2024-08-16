@@ -16,8 +16,8 @@
 #        AUTHOR: Christopher Bock (cb), christopher@bocki.com
 #  ORGANIZATION: 
 #       CREATED: 07/17/2018 05:54:02 PM
-#       UPDATED: 10/01/2022 08:51:34 AM
-#      REVISION: 2.4
+#       UPDATED: 08/16/2024 15:31:34 9M
+#      REVISION: 2.7
 #===============================================================================
 
 set -o nounset                              # Treat unset variables as an error
@@ -36,9 +36,10 @@ REPOSITORY='https://raw.githubusercontent.com/tribe29/checkMK/master/agents/plug
 PLUGINS=""
 
 # check if wget returns 0
-wget -q -O /dev/null "${SOURCE}" || exit
-wget -q -O "${SCRIPTPATH}/${BIN}" "${SOURCE}"
-chmod +x "${SCRIPTPATH}/${BIN}"
+if wget -q -o /dev/null "${source}"; then
+  wget -q -o "${scriptpath}/${bin}" "${source}"
+  chmod +x "${scriptpath}/${bin}"
+fi
 
 INETD_LINE="checkmk stream tcp nowait root $SCRIPTPATH/$BIN check_mk_agent"
 SERVICES_LINE="checkmk		6556/tcp   #check_mk_agent"
@@ -61,3 +62,28 @@ do
   $BIN_WGET -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}" "${REPOSITORY}/${plugin}"
   chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}"
 done
+
+mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
+wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
+chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
+
+# Insert Cron job
+CMKPATH=$(awk '/check_mk_agent/{print$6}' /etc/inetd.conf)
+CMKPATH=${CMKPATH%/*}
+CRON=$(midclt call cronjob.query |jq '.[]|select(.command|endswith("check_mk_setup"))|.id')
+if test -z $CRON; then
+  midclt call cronjob.create '{
+  "user": "root",
+  "command": "'$CMKPATH'/check_mk_setup",
+  "description": "checkmk_update",
+  "enabled": true,
+  "stdout": true,
+  "stderr": false,
+  "schedule": {
+  "minute": "0",
+  "hour": "*/6",
+  "dom": "*",
+  "month": "*",
+  "dow": "*"
+}}'
+fi

@@ -49,7 +49,10 @@ grep -qxF -- "$INETD_LINE" "/etc/inetd.conf" || echo "$INETD_LINE" >> /etc/inetd
 grep -qxF -- "$INETD_LINE" "/conf/base/etc/inetd.conf" || echo "$INETD_LINE" >> /conf/base/etc/inetd.conf
 grep -qxF -- "$SERVICES_LINE" "/conf/base/etc/services" || echo "$SERVICES_LINE" >> /conf/base/etc/services
 grep -qxF -- "$SERVICES_LINE" "/etc/services" || echo "$SERVICES_LINE" >> /etc/services
-grep -qxF -- "$HOSTS_ALLOW" "/etc/hosts.allow" || echo "$HOSTS_ALLOW" >> /etc/hosts.allow
+#grep -qxF -- "$HOSTS_ALLOW" "/etc/hosts.allow" || echo "$HOSTS_ALLOW" >> /etc/hosts.allow
+# just overwrite in case the lookup wasn't successfull
+sed -i '' '/^check_mk_agent.*/d' /etc/hosts.allow
+echo "$HOSTS_ALLOW" >> /etc/hosts.allow
 grep -qxF -- "check_mk_agent: ALL" "/etc/hosts.deny" || echo "check_mk_agent: ALL" >> /etc/hosts.deny
 
 killall -HUP inetd
@@ -67,9 +70,9 @@ mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
 wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 
-midclt call service.update tftp '{"enable": true}'
-midclt call service.start tftp
-midclt call service.restart tftp
+midclt call service.update tftp '{"enable": true}' >/dev/null
+#midclt call service.start tftp
+midclt call service.restart tftp >/dev/null
 
 # Insert Cron job
 CMKPATH=$(awk '/check_mk_agent/{print$6}' /etc/inetd.conf)

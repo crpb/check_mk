@@ -1,21 +1,36 @@
 #!/usr/bin/env bash
-export DEBIAN_FRONTEND=noninteractive
+# This script is only intended for single sites
+export APT_LISTCHANGES_FRONTEND="none"
+export DEBCONF_NONINTERACTIVE_SEEN="true"
+export DEBIAN_FRONTEND="noninteractive"
+export NEEDRESTART_MODE="a"
 if [[ $EUID -ne 0 ]]; then
   exec sudo "$0"
 fi
 MIRROR="https://download.checkmk.com/checkmk"
-V="$(curl -s https://download.checkmk.com/stable_downloads.json |jq -r '.checkmk[].version'|grep -v b|sort -h|tail -n 1)"
+# Don't to release-upgrades automatically.
+CURRENT=$(omd version -b $(omd sites -b) |awk '{gsub(/\.cre/,""); print}')
+TRAIN=$(cut -d. -f1,2 <<< $CURRENT)
+V="$(curl -s https://download.checkmk.com/stable_downloads.json |jq -r '.checkmk[].version'|grep -v b|sort -h|grep -m1 "$TRAIN")"
+# arg[1] to override the version
 CMKVER="${1:-${V}}"
+if [ $CMKVER = $CURRENT ]; then
+        echo "Already at latest version $CURRENT."
+        exit 0
+fi
 DEBFILE="check-mk-raw-${CMKVER}_0.$(lsb_release -cs)_amd64.deb"
 DEBLINK="${MIRROR}/${CMKVER}/${DEBFILE}"
-
+# could moved to mktemp -d ... and trap rm -rf tempdir 'EXIT' ...
 wget "${DEBLINK}" -P /tmp -nc
-dpkg -i "/tmp/${DEBFILE}"
+# install new version
+apt-get install --yes "/tmp/${DEBFILE}"
 omd stop
 omd -f -V ${CMKVER}.cre update --conflict=install "$(omd sites -b)"
 omd start "$(omd sites -b)"
-dpkg -i "/opt/omd/versions/default/share/check_mk/agents/check-mk-agent_${CMKVER}-1_all.deb"
+# Update Agent
+apt-get install --yes "/opt/omd/versions/default/share/check_mk/agents/check-mk-agent_${CMKVER}-1_all.deb"
 rm "/tmp/${DEBFILE}"
-omd cleanup
+# Rather do cleanups manually to be safe...
+#omd cleanup
 clear
-su - $(omd sites -b) bash -c 'omd status; omd version'
+su - $(omd sites -b) bash -c 'omd status; omd version; omd versions'

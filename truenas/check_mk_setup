@@ -16,16 +16,27 @@
 #        AUTHOR: Christopher Bock (cb), christopher@bocki.com
 #  ORGANIZATION: 
 #       CREATED: 07/17/2018 05:54:02 PM
-#       UPDATED: 08/16/2024 15:31:34 9M
-#      REVISION: 2.8
+#       UPDATED: 08/22/2024 07:21:34 AM
+#      REVISION: 2.9a
 #===============================================================================
 
 set -o nounset                              # Treat unset variables as an error
 
+
+SCRIPTPATH="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+
+# Set status host with a fixed ip so you don't need to rely on DNS or maybe a 
+# NAT rule
+
+# /etc/hosts.allow
+# Set status host with a fixed ip so you don't need to rely on DNS
 OMD_HOST="status.$(hostname -d)"
 OMD_IP=$(getent hosts "$OMD_HOST" |cut -d\  -f1)
+# if status-host can't be resolved sometimes/idefinitely just override with a 
+# ip in the file ~/.statushost if it exists...
+if [ -f "$HOME/.statushost" ]; then OMD_IP=$(cat "$HOME/.statushost"); fi
 OMD_CL="127.0.0.1, ${OMD_IP:-}"
-SCRIPTPATH="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 SOURCE="https://raw.githubusercontent.com/tribe29/checkMK/master/agents/check_mk_agent.freebsd"
 #SOURCE="https://YOUR.OMD.HOST/SITENAME/check_mk/agents/check_mk_agent.freebsd"
 BIN="check_mk_agent"
@@ -42,7 +53,7 @@ if wget -q -O /dev/null "${SOURCE}"; then
 fi
 
 INETD_LINE="checkmk stream tcp nowait root $SCRIPTPATH/$BIN check_mk_agent"
-SERVICES_LINE="checkmk		6556/tcp   #check_mk_agent"
+SERVICES_LINE="checkmk    6556/tcp   #check_mk_agent"
 HOSTS_ALLOW="check_mk_agent: ${OMD_CL}"
 
 grep -qxF -- "$INETD_LINE" "/etc/inetd.conf" || echo "$INETD_LINE" >> /etc/inetd.conf
@@ -55,8 +66,6 @@ sed -i '' '/^check_mk_agent.*/d' /etc/hosts.allow
 echo "$HOSTS_ALLOW" >> /etc/hosts.allow
 grep -qxF -- "check_mk_agent: ALL" "/etc/hosts.deny" || echo "check_mk_agent: ALL" >> /etc/hosts.deny
 
-killall -HUP inetd
-
 sed -i '' 's|: "${MK_LIBDIR:=/usr/local/lib/check_mk_agent}"|: "${MK_LIBDIR:='"${SCRIPTPATH}"'/check_mk_plugins}"|g' "${SCRIPTPATH}/${BIN}"
 
 for plugin in $PLUGINS;
@@ -66,20 +75,24 @@ do
   chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}"
 done
 
-mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
-wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
-chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
+#mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
+#wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
+#chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 
 midclt call service.update tftp '{"enable": true}' >/dev/null
-#midclt call service.start tftp
 midclt call service.restart tftp >/dev/null
 
 # Insert Cron job
+# could use current script path but that might lead to multiple installations
 CMKPATH=$(awk '/check_mk_agent/{print$6}' /etc/inetd.conf)
 CMKPATH=${CMKPATH%/*}
-CRON=$(midclt call cronjob.query |jq '.[]|select(.command|endswith("check_mk_setup"))|.id')
-if [[ -z $CRON ]]; then
-midclt call cronjob.create '{
+# Fallback to current dir of coursa 
+if [[ -z $CMKPATH ]]; then
+  CMKPATH=$SCRIPTPATH
+fi
+CRONJOB=$(midclt call cronjob.query |jq '.[]|select(.command|endswith("check_mk_setup"))|.id')
+if [[ -z $CRONJOB ]]; then
+  midclt call cronjob.create '{
   "user": "root",
   "command": "'$CMKPATH'/check_mk_setup",
   "description": "checkmk_update",
@@ -93,4 +106,19 @@ midclt call cronjob.create '{
     "month": "*",
     "dow": "*"
   }}'
+fi
+
+# INITSHUTDOWNSCRIPT - Execute 15 minutes after boot.
+INITSCRIPTID=$(midclt call initshutdownscript.query |jq '.[]|select(.script|endswith("check_mk_setup"))|.id')
+if [[ -z $INITSCRIPTID ]]; then
+  midclt call initshutdownscript.create '{
+    "type": "SCRIPT",
+    "command": "",
+    "script": "'$CMKPATH'/check_mk_setup",
+    "when": "POSTINIT",
+    "enabled": true,
+    "timeout": 900,
+    "comment": "checkmk setup",
+    "script_text": ""
+  }'
 fi

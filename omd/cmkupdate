@@ -1,36 +1,51 @@
 #!/usr/bin/env bash
 # This script is only intended for single sites
+# or maybe not?!!!
 export APT_LISTCHANGES_FRONTEND="none"
 export DEBCONF_NONINTERACTIVE_SEEN="true"
 export DEBIAN_FRONTEND="noninteractive"
-export NEEDRESTART_MODE="a"
+export NEEDRESTART_MODE="a" # (a)utomatically -> needrestart(1)
 if [[ $EUID -ne 0 ]]; then
   exec sudo "$0"
 fi
+LOCALTRAINS=( $(omd sites |awk '{print$2}'|cut --delimiter=. --fields=1,2) )
 MIRROR="https://download.checkmk.com/checkmk"
-# Don't to release-upgrades automatically.
-CURRENT=$(omd version -b $(omd sites -b) |awk '{gsub(/\.cre/,""); print}')
-TRAIN=$(cut -d. -f1,2 <<< $CURRENT)
-V="$(curl -s https://download.checkmk.com/stable_downloads.json |jq -r '.checkmk[].version'|grep -v b|sort -h|grep -m1 "$TRAIN")"
-# arg[1] to override the version
-CMKVER="${1:-${V}}"
-if [ $CMKVER = $CURRENT ]; then
-        echo "Already at latest version $CURRENT."
-        exit 0
-fi
-DEBFILE="check-mk-raw-${CMKVER}_0.$(lsb_release -cs)_amd64.deb"
-DEBLINK="${MIRROR}/${CMKVER}/${DEBFILE}"
-# could moved to mktemp -d ... and trap rm -rf tempdir 'EXIT' ...
-wget "${DEBLINK}" -P /tmp -nc
-# install new version
-apt-get install --yes "/tmp/${DEBFILE}"
-omd stop
-omd -f -V ${CMKVER}.cre update --conflict=install "$(omd sites -b)"
-omd start "$(omd sites -b)"
+# Only update trains we are actually using - e.g. 2.0, 2.1, 2.2
+for TRAIN in "${LOCALTRAINS[@]}"; do
+        # we don't look for any beta versions
+        LATESTTRAINVERSION="$(curl -s https://download.checkmk.com/stable_downloads.json |jq -r '.checkmk[].version'|grep -v b|sort -V|grep -m1 "$TRAIN")"
+        LOCALTRAINVERSION=$(omd versions -b |sort -rV| awk -v TRAIN=$TRAIN '$1 ~ "^" TRAIN {gsub(/\.cre/,""); print;exit}')
+        if [ $LATESTTRAINVERSION = $LOCALTRAINVERSION ]; then
+                echo "Train $TRAIN already at latest version $LATESTTRAINVERSION."
+                continue
+        fi
+        TMPDIR=$(mktemp -d --suffix=CMKV$TRAIN)
+        DEBFILE="check-mk-raw-${LATESTTRAINVERSION}_0.$(lsb_release -cs)_amd64.deb"
+        DEBLINK="${MIRROR}/${LATESTTRAINVERSION}/${DEBFILE}"
+        wget "${DEBLINK}" -P $TMPDIR
+        # install new version
+        apt-get install --yes "$TMPDIR/${DEBFILE}"
+        # update omd versions of sites
+        for SITE in "$(omd sites |awk -v TRAIN="$TRAIN" '$2 ~ "^" TRAIN {print $1}')"; do
+                omd stop $SITE
+                omd -f -V ${LATESTTRAINVERSION}.cre update --conflict=install $SITE
+                omd start $SITE
+        done
+done
+
 # Update Agent
-apt-get install --yes "/opt/omd/versions/default/share/check_mk/agents/check-mk-agent_${CMKVER}-1_all.deb"
-rm "/tmp/${DEBFILE}"
+# This might be tricky with multiple trains running on a server.
+# We will use the oldest as that should be compatible to newer releases.
+OLDESTTRAIN=$(omd versions -b |tac |grep -m1 "^${LOCALTRAINS[0]}")
+apt-get --quiet install --allow-downgrades --yes "/opt/omd/versions/${OLDESTTRAIN}/share/check_mk/agents/check-mk-agent_${OLDESTTRAIN%.cre}-1_all.deb"
 # Rather do cleanups manually to be safe...
 #omd cleanup
-clear
-su - $(omd sites -b) bash -c 'omd status; omd version; omd versions'
+# Show OMD Status/Overview
+echo
+omd sites
+echo
+omd versions
+echo
+omd status
+#su - $(omd sites -b) bash -c 'omd status; omd version; omd versions'
+

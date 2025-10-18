@@ -84,10 +84,6 @@ for plugin in $PLUGINS_3600; do
 	wget -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/3600/${plugin}" "${REPOSITORY}/${plugin}"
 	chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/${plugin}"
 done
-#wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
-#rm "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
-#wget https://8gm.eu/cmk.smart -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
-#chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 
 midclt call service.update tftp '{"enable": true}' >/dev/null
 #midclt call service.start tftp

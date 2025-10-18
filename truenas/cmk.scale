@@ -1,0 +1,34 @@
+#!/bin/sh
+set -e
+# vim:ft=sh ts=2 sts=2 sw=2 et
+# shellcheck disable=SC1007
+SDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+CMKUSER=$(awk -F: -v SDIR="$SDIR" '$6==SDIR {print $1}' /etc/passwd)
+DST="$SDIR"/check_mk_agent.linux
+MIRROR='https://raw.githubusercontent.com/checkmk/checkmk/refs/heads/master/agents'
+SRC="$MIRROR"/check_mk_agent.linux
+TMPDST=$(mktemp); trap 'rm -f $TMPDST' INT HUP EXIT
+if wget -q -O "$TMPDST" "$SRC"; then
+  sed -i "6 i\export MK_INSTALLDIR=\$(getent passwd \$SUDO_USER |awk -F: '{print \$6}')\n" "$TMPDST"
+  if [ -f "$DST" ] && diff "$TMPDST" "$DST" >/dev/null; then
+    rm -f "$TMPDST"
+  else
+    mv -f "$TMPDST" "$DST"
+    chmod u+x "$DST"
+  fi
+fi
+PLUGINS="smart_posix mk_inventory.linux"
+for PLUGIN in $PLUGINS; do
+  mkdir -p "$SDIR"/package/plugins
+  wget -q -O "$SDIR"/package/plugins/"${PLUGIN%%.linux}" "$MIRROR"/plugins/"$PLUGIN"
+  chmod +x "$SDIR"/package/plugins/"${PLUGIN%%.linux}"
+done
+# for any extra stuff not from a omd system - replace with your own 'script-mirror'
+LMIRROR='https://raw.githubusercontent.com/crpb/check_mk/refs/heads/main/truenas'
+LOCALCHECKS='truenas.py'
+for CHECK in $LOCALCHECKS; do
+  mkdir -p "$SDIR"/package/local
+  wget -q -O "$SDIR"/package/local/"${CHECK%%.linux}" "$LMIRROR"/"$CHECK"
+  chmod +x "$SDIR"/package/local/"${CHECK%%.linux}"
+done
+chown -Rf "$CMKUSER":"$CMKUSER" "$SDIR"

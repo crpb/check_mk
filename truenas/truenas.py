@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import subprocess
+import re
 import json
 
 version = (
@@ -11,7 +12,8 @@ product = (
     .decode()
 )
 [product_type, version] = version.split("-", maxsplit=1)
-if int(version.split(".")[0]) <= 25 and int(version.split(".")[1]) < 10:
+rcpat = re.compile(".*RC[-.]?[0-9]+?$")
+if not rcpat.match(version) and ( int(version.split(".")[0]) <= 25 and int(version.split(".")[1]) < 10 ):
     update_available = json.loads(
         subprocess.check_output("midclt call update.check_available", shell=True)
     )

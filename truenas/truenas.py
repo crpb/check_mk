@@ -2,6 +2,7 @@
 import subprocess
 import re
 import json
+from packaging import version as pv
 
 version = (
     subprocess.check_output("midclt call system.version", shell=True).rstrip().decode()
@@ -12,8 +13,9 @@ product = (
     .decode()
 )
 [product_type, version] = version.split("-", maxsplit=1)
+version = (version if not version.startswith("SCALE") else version.split("-")[1])
 rcpat = re.compile(".*RC[-.]?[0-9]+?$")
-if not rcpat.match(version) and ( int(version.split(".")[0]) <= 25 and int(version.split(".")[1]) < 10 ):
+if not rcpat.match(version) and (pv.Version(version) < pv.Version("25.10")):
     update_available = json.loads(
         subprocess.check_output("midclt call update.check_available", shell=True)
     )

@@ -12,12 +12,11 @@
 #          BUGS: ---
 #         NOTES: Can be installed wherever you like.
 #                Add path of the file to a Start-Script (Post-Boot).
-#                Alt. set periodic cronjob for long-running-systems.
 #        AUTHOR: Christopher Bock (cb), christopher@bocki.com
 #  ORGANIZATION: 
 #       CREATED: 07/17/2018 05:54:02 PM
-#       UPDATED: 08/22/2024 07:21:34 AM
-#      REVISION: 2.9a
+#       UPDATED: 09/22/2025 07:21:34 AM
+#      REVISION: 3.0
 #===============================================================================
 
 set -o nounset                              # Treat unset variables as an error
@@ -35,16 +34,19 @@ OMD_HOST="status.$(hostname -d)"
 OMD_IP=$(getent hosts "$OMD_HOST" |cut -d\  -f1)
 # if status-host can't be resolved sometimes/idefinitely just override with a 
 # ip in the file ~/.statushost if it exists...
-if [ -f "$HOME/.statushost" ]; then OMD_IP=$(cat "$HOME/.statushost"); fi
+if [ -f ~/.statushost ]; then OMD_IP=$(strings ~/.statushost); fi
 OMD_CL="127.0.0.1, ${OMD_IP:-}"
+
+# LATEST
 SOURCE="https://raw.githubusercontent.com/tribe29/checkMK/master/agents/check_mk_agent.freebsd"
-#SOURCE="https://YOUR.OMD.HOST/SITENAME/check_mk/agents/check_mk_agent.freebsd"
+# SITESPECIFIG
+#SOURCE="https://checkmk.yourdomain.tld/yoursite/check_mk/agents/check_mk_agent.freebsd"
 BIN="check_mk_agent"
 
 #Do we wan't extra plugins?
-#REPOSITORY='https://YOUR.OMD.HOST/SITENAME/check_mk/agents/plugins/'
-REPOSITORY='https://raw.githubusercontent.com/tribe29/checkMK/master/agents/plugins/'
+REPOSITORY='https://check.yourdomain.tld/yoursite/check_mk/agents/plugins/'
 PLUGINS=""
+PLUGINS_3600="smart_posix"
 
 # check if wget returns 0
 if wget -q -O /dev/null "${SOURCE}"; then
@@ -61,29 +63,40 @@ grep -qxF -- "$INETD_LINE" "/conf/base/etc/inetd.conf" || echo "$INETD_LINE" >> 
 grep -qxF -- "$SERVICES_LINE" "/conf/base/etc/services" || echo "$SERVICES_LINE" >> /conf/base/etc/services
 grep -qxF -- "$SERVICES_LINE" "/etc/services" || echo "$SERVICES_LINE" >> /etc/services
 #grep -qxF -- "$HOSTS_ALLOW" "/etc/hosts.allow" || echo "$HOSTS_ALLOW" >> /etc/hosts.allow
-# just overwrite in case the lookup wasn't successfull
-sed -i '' '/^check_mk_agent.*/d' /etc/hosts.allow
+# just overwride in case the lookup wasn't successfull
+sed -i '' '/^check_mk_agent/d' /etc/hosts.allow
 echo "$HOSTS_ALLOW" >> /etc/hosts.allow
 grep -qxF -- "check_mk_agent: ALL" "/etc/hosts.deny" || echo "check_mk_agent: ALL" >> /etc/hosts.deny
+# restart tftp
+killall -HUP inetd
 
-sed -i '' 's|: "${MK_LIBDIR:=/usr/local/lib/check_mk_agent}"|: "${MK_LIBDIR:='"${SCRIPTPATH}"'/check_mk_plugins}"|g' "${SCRIPTPATH}/${BIN}"
+#sed -i '' 's|: "${MK_LIBDIR:=/usr/local/lib/check_mk_agent}"|: "${MK_LIBDIR:='"${SCRIPTPATH}"'/check_mk_plugins}"|g' "${SCRIPTPATH}/${BIN}"
+sed -i '' '/MK_LIBDIR/s,/usr/local/lib/check_mk_agent,'"$SCRIPTPATH"'/check_mk_plugins,g' "${SCRIPTPATH}/${BIN}"
 
-for plugin in $PLUGINS;
-do
+for plugin in $PLUGINS; do
   mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins"
   wget -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}" "${REPOSITORY}/${plugin}"
   chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/${plugin}"
 done
 
-#mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
+for plugin in $PLUGINS_3600; do
+	mkdir -p "${SCRIPTPATH}/check_mk_plugins/plugins/3600"
+	wget -q -O "${SCRIPTPATH}/check_mk_plugins/plugins/3600/${plugin}" "${REPOSITORY}/${plugin}"
+	chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/${plugin}"
+done
 #wget https://raw.githubusercontent.com/crpb/checkmk-smart/main/disk_smart_info.py -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
+#rm "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
+#wget https://8gm.eu/cmk.smart -qO "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 #chmod +x "${SCRIPTPATH}/check_mk_plugins/plugins/3600/disk_smart_info"
 
 midclt call service.update tftp '{"enable": true}' >/dev/null
+#midclt call service.start tftp
 midclt call service.restart tftp >/dev/null
 
+
+
 # Insert Cron job
-# could use current script path but that might lead to multiple installations
+# could use current script path but that might lead to multiple installations in
 CMKPATH=$(awk '/check_mk_agent/{print$6}' /etc/inetd.conf)
 CMKPATH=${CMKPATH%/*}
 # Fallback to current dir of coursa 

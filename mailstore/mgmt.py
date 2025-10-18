@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2012 - 2024 MailStore Software GmbH
+# Copyright (c) 2012 - 2025 MailStore Software GmbH
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -121,6 +121,7 @@ class BaseClient:
                     if argument["name"] == "instanceID":
                         return True
                 return False
+        raise Exception("Server does not implement method '{}'.".format(method))
 
     def call(self, method, arguments=None, autoHandleToken=None):
         """This is where the magic happens! This method is called by all other public methods that wrap
@@ -317,7 +318,9 @@ class BaseClient:
         """
         if isinstance(privileges, (list, tuple)):
             privileges = ",".join(privileges)
-        if privileges is None:
+
+        # None, False, ""
+        if not privileges:
             privileges = "none"
 
         if isinstance(loginPrivileges, (list, tuple)):
@@ -549,8 +552,37 @@ class BaseClient:
         """
         if isinstance(privileges, (list, tuple)):
             privileges = ",".join(privileges)
+
+        # None, False, ""
+        if not privileges:
+            privileges = "none"
+
         return self.call("SetUserPrivilegesOnFolder",
                          {"userName": userName, "folder": folder, "privileges": privileges},
+                         autoHandleToken=autoHandleToken)
+
+    def SetUserPrivilegesOnAllFolders(self, userName, privileges, excludeFolders=None, autoHandleToken=None):
+        """Set user's privileges on all folders except the excluded ones
+
+        :param userName:    The username of the user who should be granted privileges.
+        :type userName:     str
+        :param privileges:  A comma-separated list of privileges that the specified user should be granted on the specified folders. Possible values are:
+                            * none    The user is denied access to the specified folder. If specified, this value has to be the only value in the list.
+                            * read    The user is granted read access to the specified folder.
+                            * write   The user is granted write access to the specified folder.
+                            * delete  The user is granted delete access to the specified folder.
+        :type privileges:   str
+        :param excludeFolders: A comma-separated list of folders to be excluded from the privilege update.
+        :type excludeFolders:  str
+        :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
+        :type autoHandleToken:  bool
+        """
+        if isinstance(privileges, (list, tuple)):
+            privileges = ",".join(privileges)
+        if isinstance(excludeFolders, (list, tuple)):
+            excludeFolders = ",".join(excludeFolders)
+        return self.call("SetUserPrivilegesOnAllFolders",
+                         {"userName": userName, "privileges": privileges, "excludeFolders": excludeFolders},
                          autoHandleToken=autoHandleToken)
 
     def ClearUserPrivilegesOnFolders(self, userName, autoHandleToken=None):
@@ -584,8 +616,11 @@ class BaseClient:
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetDirectoryServicesConfiguration", {"config": json.dumps(config)},
-                         autoHandleToken=autoHandleToken)
+
+        if isinstance(config, dict):
+            config = json.dumps(config)
+
+        return self.call("SetDirectoryServicesConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
 
     def SyncUsersWithDirectoryServices(self, dryRun=False, autoHandleToken=None):
         """Synchronizes with currently configured directory service
@@ -685,7 +720,11 @@ class BaseClient:
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetSmtpSettings", {"settings": json.dumps(settings)}, autoHandleToken=autoHandleToken)
+
+        if isinstance(settings, dict):
+            settings = json.dumps(settings)
+
+        return self.call("SetSmtpSettings", {"settings": settings}, autoHandleToken=autoHandleToken)
 
     def TestSmtpSettings(self, autoHandleToken=None):
         """Test SMTP settings by sending a test message
@@ -1094,8 +1133,7 @@ class BaseClient:
         """
         return self.call("CreateJob",
                          {"name": name, "action": action, "owner": owner, "timeZoneId": timeZoneId, "date": date,
-                          "interval": interval,
-                          "time": time, "dayOfWeek": dayOfWeek, "dayOfMonth": dayOfMonth},
+                          "interval": interval, "time": time, "dayOfWeek": dayOfWeek, "dayOfMonth": dayOfMonth},
                          autoHandleToken=autoHandleToken)
 
     def RenameJob(self, id, name, autoHandleToken=None):
@@ -1692,6 +1730,8 @@ class SPEClient(BaseClient):
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
+        if isinstance(config, dict):
+            config = json.dumps(config)
         return self.call("CreateInstanceHost", {"config": config}, autoHandleToken=autoHandleToken)
 
     def SetInstanceHostConfiguration(self, config, autoHandleToken=None):
@@ -1702,6 +1742,8 @@ class SPEClient(BaseClient):
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
+        if isinstance(config, dict):
+            config = json.dumps(config)
         return self.call("SetInstanceHostConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
 
     def GetDirectoriesOnInstanceHost(self, serverName, path=None, autoHandleToken=None):
@@ -1758,10 +1800,12 @@ class SPEClient(BaseClient):
         """Creates new instance.
 
         :param config:          Configuration of new Instance Host
-        :type  config:          str (JSON)
+        :type  config:          dict | str (JSON)
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
+        if isinstance(config, dict):
+            config = json.dumps(config)
         return self.call("CreateInstance", {"config": config}, autoHandleToken=autoHandleToken)
 
     def GetInstanceConfiguration(self, autoHandleToken=None):
@@ -1776,10 +1820,12 @@ class SPEClient(BaseClient):
         """Set configuration of MailStore Instance
 
         :param config:          Instance configuration.
-        :type config:           str (JSON)
+        :type config:           dict | str (JSON)
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
+        if isinstance(config, dict):
+            config = json.dumps(config)
         return self.call("SetInstanceConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
 
     def StartInstances(self, instanceFilter, autoHandleToken=None):
@@ -1939,7 +1985,9 @@ class SPEClient(BaseClient):
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetIndexConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
+        if isinstance(config, dict):
+            config = json.dumps(config)
+        return self.call("SetIndexConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
 
     # ---------------------------------------------------------------- #
     # System Administrators                                            #
@@ -1963,7 +2011,9 @@ class SPEClient(BaseClient):
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("CreateSystemAdministrator", {"config": json.dumps(config), "password": password},
+        if isinstance(config, dict):
+            config = json.dumps(config)
+        return self.call("CreateSystemAdministrator", {"config": config, "password": password},
                          autoHandleToken=autoHandleToken)
 
     def SetSystemAdministratorConfiguration(self, config, autoHandleToken=None):
@@ -1974,7 +2024,9 @@ class SPEClient(BaseClient):
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetSystemAdministratorConfiguration", {"config": json.dumps(config)},
+        if isinstance(config, dict):
+            config = json.dumps(config)
+        return self.call("SetSystemAdministratorConfiguration", {"config": config},
                          autoHandleToken=autoHandleToken)
 
     def SetSystemAdministratorPassword(self, userName, password, autoHandleToken=None):
@@ -2056,7 +2108,9 @@ class SPEClient(BaseClient):
         :param autoHandleToken: If set to True, the caller does not need to handle tokens of long-running tasks, but instead has to wait for the result.
         :type autoHandleToken:  bool
         """
-        return self.call("SetSystemSmtpConfiguration", {"config": json.dumps(config)}, autoHandleToken=autoHandleToken)
+        if isinstance(config, dict):
+            config = json.dumps(config)
+        return self.call("SetSystemSmtpConfiguration", {"config": config}, autoHandleToken=autoHandleToken)
 
     def TestSystemSmtpConfiguration(self, autoHandleToken=None):
         """Test system-wide SMTP settings by sending a test message.

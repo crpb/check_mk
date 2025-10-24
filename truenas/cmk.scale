@@ -9,7 +9,8 @@ MIRROR='https://raw.githubusercontent.com/checkmk/checkmk/refs/heads/master/agen
 SRC="$MIRROR"/check_mk_agent.linux
 TMPDST=$(mktemp); trap 'rm -f $TMPDST' INT HUP EXIT
 if wget -q -O "$TMPDST" "$SRC"; then
-  sed -i "6 i\export MK_INSTALLDIR=\$(getent passwd \$SUDO_USER |awk -F: '{print \$6}')\n" "$TMPDST"
+  sed -i '6 i\[ "${FLOCKER}" != "$0" ] && exec env FLOCKER="$0" flock -en "$0" "$0" "$@" || :\n' "$TMPDST"
+  sed -i "7 i\export MK_INSTALLDIR=\$(getent passwd \$SUDO_USER |awk -F: '{print \$6}')\n" "$TMPDST"
   if [ -f "$DST" ] && diff "$TMPDST" "$DST" >/dev/null; then
     rm -f "$TMPDST"
   else
